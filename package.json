@@ -1,14 +1,15 @@
 {
   "name": "zentao-mcp",
   "version": "1.0.0",
-  "description": "禅道 MCP 服务器 - 通过cookie认证并查询需求、bug、任务等内容",
+  "description": "禅道 MCP 服务器 - 通过Cookie认证查询、新建和修改数据，禁止删除",
   "type": "module",
   "main": "src/index.js",
   "bin": {
     "zentao-mcp": "./src/index.js"
   },
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "test": "node --test tests/*.test.js"
   },
   "keywords": [
     "mcp",
@@ -20,7 +21,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yuunie/zentao-mcp.git"
+    "url": "https://github.com/teiny/zentao-mcp.git"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^0.5.0",

@@ -101,17 +101,26 @@ AI：我会使用 get_requirement 工具获取需求详情...
 AI：我会使用 get_bugs 工具获取bug列表...
 ```
 
-### 示例 4：获取项目任务
+### 示例 4：获取执行任务
 
 **对话示例：**
 
 ```
-你：获取项目ID为5的所有任务
+你：获取执行ID为2159的任务
 
-AI：我会使用 get_tasks 工具获取项目任务...
+AI：我会使用 get_tasks 工具获取执行任务；如果只有项目ID，先用 get_executions 获取执行列表。
 ```
 
 ## 可用工具列表
+
+### 六类分页列表
+
+`get_products`（产品）、`get_projects`（项目）、`get_executions`（执行）、`get_requirements`（需求）、`get_tasks`（任务）、`get_bugs`（Bug）统一支持page和limit。
+
+- page为正整数，默认1；limit为1至100的整数，默认20。
+- 需求、Bug按productId查询；任务按executionId查询；执行可选projectId，不传时查全局。
+- 返回原实体数组和page、limit、total、totalPages、count、hasNext、nextPage。hasNext为true时保留范围及limit，按nextPage继续；用户要求全部数据时须逐页完成。
+- 产品接口全量返回时由MCP分页。其他接口的分页请求和响应须一致，不能把服务端重复返回的第一页标成第二页。
 
 ### configure
 配置禅道连接信息
@@ -129,8 +138,8 @@ AI：我会使用 get_tasks 工具获取项目任务...
 获取产品需求列表
 - **参数：**
   - `productId` (number, 必需): 产品ID
-  - `page` (number, 可选): 页码，默认1
-  - `limit` (number, 可选): 每页数量，默认20
+  - `page` (integer, 可选): 正整数页码，默认1
+  - `limit` (integer, 可选): 每页数量1至100，默认20
 
 ### get_requirement
 获取单个需求详情
@@ -141,15 +150,27 @@ AI：我会使用 get_tasks 工具获取项目任务...
 获取产品 bug 列表
 - **参数：**
   - `productId` (number, 必需): 产品ID
-  - `page` (number, 可选): 页码，默认1
-  - `limit` (number, 可选): 每页数量，默认20
+  - `page` (integer, 可选): 正整数页码，默认1
+  - `limit` (integer, 可选): 每页数量1至100，默认20
 
 ### get_tasks
-获取项目任务列表
+获取执行任务列表
 - **参数：**
-  - `projectId` (number, 必需): 项目ID
-  - `page` (number, 可选): 页码，默认1
-  - `limit` (number, 可选): 每页数量，默认20
+  - `executionId` (integer, 必需): 执行ID，不是项目ID
+  - `page` (integer, 可选): 正整数页码，默认1
+  - `limit` (integer, 可选): 每页数量1至100，默认20
+
+### get_executions
+分页获取执行列表，参数为page、limit及可选的 `projectId`（正整数项目ID）；不传projectId时查询全局执行列表。
+
+### get_task
+获取任务详情，参数为 `taskId`（正整数任务ID）。
+
+### 新建、修改及需求内容变更
+
+提供 `create_product` / `update_product`、`create_project` / `update_project`、`create_requirement` / `update_requirement`、`create_bug` / `update_bug`、`create_task` / `update_task`。业务字段放在 `data` 对象，目标或父对象ID放在顶层。必填字段及示例见 [README 的新建和修改说明](README.md#3-新建和修改数据)。
+
+需求标题、描述或验收标准的变更使用 `change_requirement`，不使用普通字段修改工具。删除、软删除和任意 HTTP 请求均不支持。
 
 ### get_product
 获取产品详情

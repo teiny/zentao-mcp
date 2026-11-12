@@ -6,6 +6,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { callWriteTool, isWriteTool, positiveId, writeTools } from "./write-tools.js";
+import { callListTool, isListTool, listTools } from "./list-tools.js";
 
 // 配置存储
 let config = {
@@ -17,6 +19,9 @@ let config = {
  * 发送 API 请求（使用 Cookie）
  */
 async function apiRequest(endpoint, method = "GET", body = null) {
+  if (!["GET", "POST", "PUT"].includes(method)) {
+    throw new Error("仅支持查询、新建和修改，禁止删除数据");
+  }
   if (!config.zentaosid) {
     throw new Error("请先配置 zentaosid");
   }
@@ -45,9 +50,14 @@ async function apiRequest(endpoint, method = "GET", body = null) {
       throw new Error(`API 请求失败: ${response.status} ${errorText}`);
     }
 
-    return await response.json();
+    const result = await response.json();
+    if (result?.error || result?.status === "fail") {
+      throw new Error(`API 业务错误: ${JSON.stringify(result.error || result.message || result)}`);
+    }
+    return result;
   } catch (error) {
-    throw new Error(`API 请求出错: ${error.message}`);
+    const message = config.zentaosid ? error.message.split(config.zentaosid).join("[已隐藏]") : error.message;
+    throw new Error(`API 请求出错: ${message}`);
   }
 }
 
@@ -86,72 +96,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["url", "zentaosid"],
         },
       },
-      {
-        name: "get_requirements",
-        description: "获取产品的需求列表",
-        inputSchema: {
-          type: "object",
-          properties: {
-            productId: {
-              type: "number",
-              description: "产品ID",
-            },
-            page: {
-              type: "number",
-              description: "页码（默认：1）",
-            },
-            limit: {
-              type: "number",
-              description: "每页数量（默认：20）",
-            },
-          },
-          required: ["productId"],
-        },
-      },
-      {
-        name: "get_bugs",
-        description: "获取产品的 bug 列表",
-        inputSchema: {
-          type: "object",
-          properties: {
-            productId: {
-              type: "number",
-              description: "产品ID",
-            },
-            page: {
-              type: "number",
-              description: "页码（默认：1）",
-            },
-            limit: {
-              type: "number",
-              description: "每页数量（默认：20）",
-            },
-          },
-          required: ["productId"],
-        },
-      },
-      {
-        name: "get_tasks",
-        description: "获取项目的任务列表",
-        inputSchema: {
-          type: "object",
-          properties: {
-            projectId: {
-              type: "number",
-              description: "项目ID",
-            },
-            page: {
-              type: "number",
-              description: "页码（默认：1）",
-            },
-            limit: {
-              type: "number",
-              description: "每页数量（默认：20）",
-            },
-          },
-          required: ["projectId"],
-        },
-      },
+      ...listTools,
       {
         name: "get_product",
         description: "获取产品详情",
@@ -208,6 +153,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["bugId"],
         },
       },
+      {
+        name: "get_task",
+        description: "获取任务详情，用于修改前核对和写入后验证",
+        inputSchema: {
+          type: "object",
+          properties: { taskId: { type: "integer", minimum: 1, description: "任务ID" } },
+          required: ["taskId"],
+        },
+      },
+      ...writeTools,
     ],
   };
 });
@@ -217,6 +172,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
+    if (isListTool(name)) {
+      const result = await callListTool(name, args, apiRequest);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+    if (isWriteTool(name)) {
+      const result = await callWriteTool(name, args, apiRequest);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
     switch (name) {
       case "configure": {
         config = {
@@ -230,51 +193,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               text: `禅道配置已更新：
 - URL: ${config.url}
 - Zentaosid: ${config.zentaosid ? "已配置" : "未配置"}`,
-            },
-          ],
-        };
-      }
-
-      case "get_requirements": {
-        const { productId, page = 1, limit = 20 } = args;
-        const result = await apiRequest(
-          `/products/${productId}/stories?page=${page}&limit=${limit}`
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "get_bugs": {
-        const { productId, page = 1, limit = 20 } = args;
-        const result = await apiRequest(
-          `/products/${productId}/bugs?page=${page}&limit=${limit}`
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "get_tasks": {
-        const { projectId, page = 1, limit = 20 } = args;
-        const result = await apiRequest(
-          `/projects/${projectId}/tasks?page=${page}&limit=${limit}`
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
             },
           ],
         };
@@ -330,6 +248,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+
+      case "get_task": {
+        const taskId = positiveId(args.taskId, "taskId");
+        const result = await apiRequest(`/tasks/${taskId}`);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       }
 
       default:
