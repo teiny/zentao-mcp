@@ -60,7 +60,7 @@ before(async () => {
     if (bugParent) { collection = "bugs"; parent = { product: Number(bugParent[1]) }; }
     if (taskParent) { collection = "tasks"; parent = { execution: Number(taskParent[1]) }; }
     if (request.method === "POST" && collection) {
-      const record = { id: nextId++, ...parent, ...body };
+      const record = { id: nextId++, ...(collection === "bugs" ? { status: "active" } : {}), ...parent, ...body };
       records[collection].set(record.id, record);
       return send(201, record);
     }
@@ -69,6 +69,13 @@ before(async () => {
       const record = records.stories.get(Number(change[1]));
       if (!record) return send(404, { error: "not found" });
       Object.assign(record, body);
+      return send(200, record);
+    }
+    const resolve = path.match(/^\/bugs\/(\d+)\/resolve$/);
+    if (request.method === "POST" && resolve) {
+      const record = records.bugs.get(Number(resolve[1]));
+      if (!record) return send(404, { error: "not found" });
+      Object.assign(record, body, { status: "resolved" });
       return send(200, record);
     }
     const single = path.match(/^\/(products|projects|stories|bugs|tasks)\/(\d+)$/);
@@ -246,6 +253,40 @@ test("需求内容通过独立变更接口更新", async () => {
   assert.equal(requests.at(-1).path, `/stories/${created.id}/change`);
   const updated = await call("get_requirement", { storyId: created.id });
   assert.equal(updated.title, "变更标题");
+});
+
+test("解决Bug通过MCP调用独立接口并读回解决状态", async () => {
+  const created = await call("create_bug", { productId: 1, data: { title: "待解决Bug", severity: 2, pri: 2, type: "codeerror" } });
+  assert.equal(created.status, "active");
+  const data = {
+    resolution: "fixed", resolvedBuild: "trunk", resolvedDate: "2026-11-12 17:09:22",
+    assignedTo: "tester", comment: "修复后已验证",
+  };
+  const resolved = await call("resolve_bug", { bugId: created.id, data });
+  assert.equal(requests.at(-1).method, "POST");
+  assert.equal(requests.at(-1).path, `/bugs/${created.id}/resolve`);
+  assert.deepEqual(requests.at(-1).body, data);
+  assert.equal(resolved.status, "resolved");
+  const readBack = await call("get_bug", { bugId: created.id });
+  assert.equal(readBack.status, "resolved");
+  assert.equal(readBack.resolution, "fixed");
+  assert.equal(readBack.resolvedBuild, "trunk");
+  assert.equal(readBack.assignedTo, "tester");
+});
+
+test("重复Bug解决方案携带关联Bug且非法解决参数不发送请求", async () => {
+  const created = await call("create_bug", { productId: 1, data: { title: "重复Bug", severity: 2, pri: 2, type: "codeerror" } });
+  await call("resolve_bug", { bugId: created.id, data: { resolution: "duplicate", duplicateBug: 42, resolvedBuild: 8 } });
+  assert.deepEqual(requests.at(-1).body, { resolution: "duplicate", duplicateBug: 42, resolvedBuild: 8 });
+  const beforeCount = requests.length;
+  for (const data of [
+    { resolution: "duplicate" }, { resolution: "duplicate", duplicateBug: created.id },
+    { resolution: "delete" }, { resolution: "fixed", deleted: 1 },
+  ]) {
+    const result = await client.callTool({ name: "resolve_bug", arguments: { bugId: created.id, data } });
+    assert.equal(result.isError, true);
+  }
+  assert.equal(requests.length, beforeCount);
 });
 
 test("删除工具、删除标记和错误任务参数均不触发HTTP请求", async () => {

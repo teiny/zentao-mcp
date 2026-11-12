@@ -18,6 +18,14 @@ const invalid = [
   ["关联产品类型错误", "create_project", { data: { name: "项目", code: "p", begin: "2026-11-12", end: "2026-12-12", products: ["1"] } }],
   ["需求内容不能走普通编辑", "update_requirement", { storyId: 1, data: { spec: "新描述" } }],
   ["不能使用继承属性作为字段", "update_product", { productId: 1, data: JSON.parse('{"__proto__":{"deleted":1}}') }],
+  ["缺少解决方案", "resolve_bug", { bugId: 1, data: { comment: "说明" } }],
+  ["未知解决方案", "resolve_bug", { bugId: 1, data: { resolution: "delete" } }],
+  ["重复解决缺少关联Bug", "resolve_bug", { bugId: 1, data: { resolution: "duplicate" } }],
+  ["重复Bug不能指向自身", "resolve_bug", { bugId: 1, data: { resolution: "duplicate", duplicateBug: 1 } }],
+  ["解决版本不能为零", "resolve_bug", { bugId: 1, data: { resolution: "fixed", resolvedBuild: 0 } }],
+  ["解决版本不能为任意文本", "resolve_bug", { bugId: 1, data: { resolution: "fixed", resolvedBuild: "任意版本名" } }],
+  ["解决日期格式无效", "resolve_bug", { bugId: 1, data: { resolution: "fixed", resolvedDate: "明天" } }],
+  ["解决操作不能携带删除标记", "resolve_bug", { bugId: 1, data: { resolution: "fixed", deleted: 1 } }],
 ];
 
 for (const [description, name, args] of invalid) {
@@ -29,9 +37,9 @@ for (const [description, name, args] of invalid) {
 }
 
 test("仅暴露明确的新建修改工具，不接受删除或原型属性作为工具", async () => {
-  assert.equal(writeTools.length, 11);
+  assert.equal(writeTools.length, 12);
   for (const tool of writeTools) {
-    assert.match(tool.name, /^(create|update|change)_/);
+    assert.match(tool.name, /^(create|update|change|resolve)_/);
     assert.equal(tool.inputSchema.additionalProperties, false);
     assert.equal(tool.inputSchema.properties.data.additionalProperties, false);
   }
@@ -71,4 +79,24 @@ test("完整Bug修改不额外读取，产品正常关闭仍属于允许的修�
   await callWriteTool("update_product", { productId: 1, data: { status: "closed" } }, request);
   assert.deepEqual(requests.map((item) => item.method), ["PUT", "PUT"]);
   assert.equal(requests[1].body.status, "closed");
+});
+
+test("解决Bug接受版本ID、ID字符串或主干，不自动填充其他字段", async () => {
+  for (const resolvedBuild of [8, "8", "trunk"]) {
+    const requests = [];
+    await callWriteTool("resolve_bug", { bugId: 10, data: { resolution: "fixed", resolvedBuild } }, async (path, method, body) => {
+      requests.push({ path, method, body });
+      return { id: 10, status: "resolved" };
+    });
+    assert.deepEqual(requests, [{ path: "/bugs/10/resolve", method: "POST", body: { resolution: "fixed", resolvedBuild } }]);
+  }
+});
+
+test("解决Bug支持日期及完整时间，重复Bug使用另一对象ID", async () => {
+  for (const resolvedDate of ["2026-11-12", "2026-11-12 17:09:22"]) {
+    let sent;
+    await callWriteTool("resolve_bug", { bugId: 10, data: { resolution: "duplicate", duplicateBug: 11, resolvedDate } }, async (path, method, body) => { sent = body; });
+    assert.equal(sent.duplicateBug, 11);
+    assert.equal(sent.resolvedDate, resolvedDate);
+  }
 });

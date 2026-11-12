@@ -90,6 +90,27 @@ const definitions = {
     description: "部分修改Bug；自动读取并保留API要求的标题、严重程度、优先级、类型原值",
     method: "PUT", id: "bugId", endpoint: (id) => `/bugs/${id}`, fields: bugFields, preserveBugRequired: true,
   },
+  resolve_bug: {
+    description: "解决Bug，调用独立状态流转接口；resolution必填，duplicate方案还必须提供duplicateBug",
+    method: "POST", id: "bugId", endpoint: (id) => `/bugs/${id}/resolve`, required: ["resolution"],
+    fields: {
+      resolution: {
+        ...text("解决方案：fixed已解决、bydesign设计如此、duplicate重复Bug、external外部原因、notrepro无法重现、postponed延期、willnotfix不予解决、tostory转需求"),
+        enum: ["fixed", "bydesign", "duplicate", "external", "notrepro", "postponed", "willnotfix", "tostory"],
+      },
+      duplicateBug: integer("重复Bug ID，resolution为duplicate时必填，不能指向自身", 1),
+      resolvedBuild: {
+        description: "解决版本：正整数版本ID、版本ID字符串，或trunk（主干）",
+        anyOf: [integer("版本ID", 1), { type: "string", pattern: "^(?:trunk|[1-9]\\d*)$" }],
+      },
+      resolvedDate: {
+        ...text("解决日期或时间，YYYY-MM-DD或YYYY-MM-DD HH:mm:ss；省略时由禅道决定"),
+        pattern: "^\\d{4}-\\d{2}-\\d{2}(?: \\d{2}:\\d{2}:\\d{2})?$",
+      },
+      assignedTo: text("解决后指派给的用户账号，不是显示姓名"),
+      comment: text("解决备注"),
+    },
+  },
   create_task: {
     description: "在执行下新建任务；data中的name、type、assignedTo、estStarted、deadline必填",
     method: "POST", id: "executionId", endpoint: (id) => `/executions/${id}/tasks`, fields: taskFields,
@@ -107,6 +128,12 @@ export function positiveId(value, name) {
 }
 
 function validateValue(value, schema, name) {
+  if (schema.anyOf) {
+    for (const option of schema.anyOf) {
+      try { validateValue(value, option, name); return; } catch { /* 尝试其他声明的类型 */ }
+    }
+    throw new Error(`${name}不符合允许的类型或取值`);
+  }
   const type = schema.type;
   const valid = type === "array" ? Array.isArray(value)
     : type === "integer" ? Number.isSafeInteger(value)
@@ -116,6 +143,7 @@ function validateValue(value, schema, name) {
   if (schema.minimum !== undefined && value < schema.minimum) throw new Error(`${name}不能小于${schema.minimum}`);
   if (schema.maximum !== undefined && value > schema.maximum) throw new Error(`${name}不能大于${schema.maximum}`);
   if (schema.enum && !schema.enum.includes(value)) throw new Error(`${name}不是支持的值`);
+  if (schema.pattern && !new RegExp(schema.pattern).test(value)) throw new Error(`${name}格式不正确`);
   if (schema.format === "date" && !/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error(`${name}必须为YYYY-MM-DD日期`);
   if (type === "array") {
     if (schema.minItems && value.length < schema.minItems) throw new Error(`${name}不能为空`);
@@ -168,6 +196,10 @@ export async function callWriteTool(name, args, request) {
   }
   const id = definition.id ? positiveId(args[definition.id], definition.id) : undefined;
   const body = validateData(args.data, definition.fields, definition.required);
+  if (name === "resolve_bug" && body.resolution === "duplicate") {
+    positiveId(body.duplicateBug, "duplicateBug");
+    if (body.duplicateBug === id) throw new Error("duplicateBug不能指向当前Bug自身");
+  }
   if (definition.preserveBugRequired) {
     const required = ["title", "severity", "pri", "type"];
     if (required.some((key) => !Object.hasOwn(body, key))) {

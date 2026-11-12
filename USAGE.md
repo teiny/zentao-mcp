@@ -172,6 +172,20 @@ AI：我会使用 get_tasks 工具获取执行任务；如果只有项目ID，�
 
 需求标题、描述或验收标准的变更使用 `change_requirement`，不使用普通字段修改工具。删除、软删除和任意 HTTP 请求均不支持。
 
+### resolve_bug
+
+通过独立的 `POST /bugs/{bugId}/resolve` 解决Bug。
+
+- `bugId`：必填，正整数Bug ID。
+- `data.resolution`：必填，fixed、bydesign、duplicate、external、notrepro、postponed、willnotfix或tostory。
+- `data.duplicateBug`：重复Bug方案必填，不能与bugId相同。
+- `data.resolvedBuild`：可选，版本ID整数、ID字符串或trunk。
+- `data.resolvedDate`：可选，YYYY-MM-DD或YYYY-MM-DD HH:mm:ss。
+- `data.assignedTo`：可选，用户账号。
+- `data.comment`：可选，备注。
+
+先用get_bug核对目标，调用后读回状态。普通update_bug不会代替该状态流转操作。附件上传、新建版本不在此工具范围。
+
 ### get_product
 获取产品详情
 - **参数：**
