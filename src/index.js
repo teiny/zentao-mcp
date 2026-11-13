@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { callWriteTool, isWriteTool, positiveId, writeTools } from "./write-tools.js";
 import { callListTool, isListTool, listTools } from "./list-tools.js";
+import { callWorkflowTool, isWorkflowTool, workflowTools } from "./workflow-tools.js";
 
 // 配置存储
 let config = {
@@ -19,6 +20,18 @@ let config = {
  * 发送 API 请求（使用 Cookie）
  */
 async function apiRequest(endpoint, method = "GET", body = null) {
+  return sendRequest(`/api.php/v1${endpoint}`, method, body);
+}
+
+// 仅供专用工具使用的17.0原生JSON表单接口，不向调用者开放任意路由。
+async function nativeRequest(module, action, objectId, body = null) {
+  const allowed = { execution: ["close"], task: ["close"] };
+  if (!Object.hasOwn(allowed, module) || !allowed[module].includes(action)) throw new Error("不支持的原生接口");
+  positiveId(objectId, "objectId");
+  return sendRequest(`/index.php/${module}-${action}-${objectId}.json`, body === null ? "GET" : "POST", body, true);
+}
+
+async function sendRequest(path, method, body, native = false) {
   if (!["GET", "POST", "PUT"].includes(method)) {
     throw new Error("仅支持查询、新建和修改，禁止删除数据");
   }
@@ -28,18 +41,27 @@ async function apiRequest(endpoint, method = "GET", body = null) {
   
   // 确保 URL 末尾没有斜杠，然后拼接路径
   const baseUrl = config.url.replace(/\/$/, "");
-  const url = `${baseUrl}/api.php/v1${endpoint}`;
+  const url = `${baseUrl}${path}`;
 
   const options = {
     method,
     headers: {
-      "Content-Type": "application/json",
       Cookie: `zentaosid=${config.zentaosid}`, // Cookie 中使用 zentaosid
+      Accept: "application/json",
     },
+    redirect: "manual",
+    signal: AbortSignal.timeout(30000),
   };
 
-  if (body) {
+  if (body instanceof URLSearchParams) {
+    options.body = body;
+  } else if (body) {
+    options.headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(body);
+  }
+  if (native) {
+    options.headers["X-Requested-With"] = "XMLHttpRequest";
+    options.headers.Referer = `${baseUrl}/index.php`;
   }
 
   try {
@@ -50,9 +72,20 @@ async function apiRequest(endpoint, method = "GET", body = null) {
       throw new Error(`API 请求失败: ${response.status} ${errorText}`);
     }
 
-    const result = await response.json();
-    if (result?.error || result?.status === "fail") {
+    const raw = await response.text();
+    let result;
+    try { result = JSON.parse(raw); } catch {
+      // 原生关闭成功可返回跳转脚本；只接受已知跳转标记，调用者仍须回读验证。
+      if (native && method === "POST" && /<script\b/i.test(raw) && /(?:location|reload)/i.test(raw) && !/(?:alert\s*\(|user[-/]login|loginForm)/i.test(raw)) {
+        return { responseReceived: true, verified: false };
+      }
+      throw new Error("响应不是JSON，可能是登录页、权限错误或业务校验失败");
+    }
+    if (result?.error || ["fail", "error"].includes(result?.status) || result?.result === "fail") {
       throw new Error(`API 业务错误: ${JSON.stringify(result.error || result.message || result)}`);
+    }
+    if (native && result?.status === "success" && Object.hasOwn(result, "data")) {
+      return typeof result.data === "string" ? JSON.parse(result.data) : result.data;
     }
     return result;
   } catch (error) {
@@ -163,6 +196,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       ...writeTools,
+      ...workflowTools,
     ],
   };
 });
@@ -172,6 +206,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
+    if (isWorkflowTool(name)) {
+      const result = await callWorkflowTool(name, args, apiRequest, nativeRequest);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
     if (isListTool(name)) {
       const result = await callListTool(name, args, apiRequest);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };

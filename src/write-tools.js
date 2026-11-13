@@ -144,14 +144,17 @@ function validateValue(value, schema, name) {
   if (schema.maximum !== undefined && value > schema.maximum) throw new Error(`${name}不能大于${schema.maximum}`);
   if (schema.enum && !schema.enum.includes(value)) throw new Error(`${name}不是支持的值`);
   if (schema.pattern && !new RegExp(schema.pattern).test(value)) throw new Error(`${name}格式不正确`);
-  if (schema.format === "date" && !/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error(`${name}必须为YYYY-MM-DD日期`);
+  if (schema.format === "date" && (!/^\d{4}-\d{2}-\d{2}$/.test(value) ||
+      !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value)) {
+    throw new Error(`${name}必须为有效YYYY-MM-DD日期`);
+  }
   if (type === "array") {
     if (schema.minItems && value.length < schema.minItems) throw new Error(`${name}不能为空`);
     value.forEach((item) => validateValue(item, schema.items, name));
   }
 }
 
-function validateData(data, fields, required = []) {
+export function validateData(data, fields, required = []) {
   if (!data || typeof data !== "object" || Array.isArray(data) || Object.keys(data).length === 0) {
     throw new Error("data必须是包含待写入字段的非空对象");
   }

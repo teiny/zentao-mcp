@@ -8,7 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const records = Object.fromEntries(
-  ["products", "projects", "stories", "bugs", "tasks"].map((name) => [name, new Map()])
+  ["products", "projects", "executions", "stories", "bugs", "tasks"].map((name) => [name, new Map()])
 );
 const requests = [];
 let nextId = 100;
@@ -24,7 +24,7 @@ before(async () => {
     const path = url.pathname.replace(/^\/zentao\/api\.php\/v1/, "");
     let text = "";
     for await (const chunk of request) text += chunk;
-    const body = text ? JSON.parse(text) : undefined;
+    const body = !text ? undefined : request.headers["content-type"]?.startsWith("application/x-www-form-urlencoded") ? Object.fromEntries(new URLSearchParams(text)) : JSON.parse(text);
     requests.push({ method: request.method, path, query: Object.fromEntries(url.searchParams), body, cookie: request.headers.cookie });
     const send = (status, data) => {
       response.writeHead(status, { "Content-Type": "application/json" });
@@ -33,6 +33,35 @@ before(async () => {
     if (request.headers.cookie !== "zentaosid=test-session") {
       return send(401, { error: "unauthorized" });
     }
+    const nativeRoute = url.pathname.match(/^\/zentao\/index\.php\/(execution|task)-close-(\d+)\.json$/);
+    if (nativeRoute) {
+      const [, module, rawId] = nativeRoute;
+      const action = "close";
+      const objectId = Number(rawId);
+      if (["execution", "task"].includes(module) && action === "close") {
+        const record = records[module === "execution" ? "executions" : "tasks"].get(objectId);
+        if (!record) return send(404, { error: "not found" });
+        if (request.method === "GET") return send(200, { status: "success", data: JSON.stringify({ [module]: record }) });
+        if (module === "task") {
+          assert.equal(body.status, "closed");
+          Object.assign(record, { status: body.status, closedReason: "done" });
+        }
+        else {
+          assert.equal([...records.tasks.values()].some(task => task.execution === objectId && task.status === "done"), false);
+          Object.assign(record, { status: body.status, realEnd: body.realEnd });
+        }
+        response.writeHead(200, { "Content-Type": "text/html" });
+        return response.end('<script>parent.location.reload();</script>');
+      }
+    }
+    const executionTasks = path.match(/^\/executions\/(\d+)\/tasks$/);
+    if (request.method === "GET" && executionTasks && records.executions.has(Number(executionTasks[1]))) {
+      const rows = [...records.tasks.values()].filter(task => task.execution === Number(executionTasks[1]));
+      const page = Number(url.searchParams.get("page") || 1);
+      const limit = Number(url.searchParams.get("limit") || 20);
+      return send(200, { page, limit, total: rows.length, tasks: rows.slice((page - 1) * limit, page * limit) });
+    }
+
     const lists = {
       "/products": ["products", 1], "/projects": ["projects", 101],
       "/executions": ["executions", 2159], "/projects/121/executions": ["executions", 2159],
@@ -78,7 +107,7 @@ before(async () => {
       Object.assign(record, body, { status: "resolved" });
       return send(200, record);
     }
-    const single = path.match(/^\/(products|projects|stories|bugs|tasks)\/(\d+)$/);
+    const single = path.match(/^\/(products|projects|executions|stories|bugs|tasks)\/(\d+)$/);
     if (single) {
       const record = records[single[1]].get(Number(single[2]));
       if (!record) return send(404, { error: "not found" });
@@ -105,6 +134,7 @@ before(async () => {
   client = new Client({ name: "zentao-integration-test", version: "1.0.0" }, { capabilities: {} });
   await client.connect(transport);
   child = transport._process;
+  child.on("error", (error) => { if (error.code !== "ABORT_ERR") console.error(error.code); });
   console.log(JSON.stringify({ purpose: "Local MCP integration tests", pid: child.pid, testPid: process.pid, startedAt: new Date().toISOString(), executable: process.execPath, close: "client.close() and api.close()", mockPort: port }));
 });
 
@@ -311,4 +341,26 @@ test("HTTP认证错误及HTTP200业务错误返回失败且不显示会话值", 
     assert.equal(result.isError, true);
     assert.equal(JSON.stringify(result).includes("test-session"), false);
   }
+});
+
+test("关闭执行通过MCP分页检查；不满足条件不碰任务，满足后先关done任务并正式关闭执行", async () => {
+  records.executions.set(8001, { id: 8001, project: 20, type: "sprint", name: "可关闭执行", status: "doing", realEnd: null, deleted: false });
+  for (let index = 0; index < 101; index++) records.tasks.set(9000 + index, { id: 9000 + index, execution: 8001, status: index === 0 ? "done" : index === 100 ? "wait" : "closed", deleted: false });
+  const args = { executionId: 8001, realEnd: "2026-11-13" };
+  const writes = requests.filter(item => item.method !== "GET").length;
+  const blocked = await client.callTool({ name: "close_execution", arguments: { ...args, dryRun: false } });
+  assert.equal(blocked.isError, true);
+  assert.equal(records.tasks.get(9000).status, "done");
+  assert.equal(requests.filter(item => item.method !== "GET").length, writes);
+  records.tasks.get(9100).status = "cancel";
+  assert.deepEqual((await call("close_execution", args)).tasksToClose, [9000]);
+  assert.equal(requests.filter(item => item.method !== "GET").length, writes);
+  const result = await call("close_execution", { ...args, dryRun: false });
+  assert.equal(result.verified, true);
+  assert.deepEqual(result.closedTaskIds, [9000]);
+  assert.equal(records.tasks.get(9100).status, "cancel");
+  const saved = await call("get_execution", { executionId: 8001 });
+  assert.equal(saved.status, "closed");
+  assert.equal(saved.realEnd, args.realEnd);
+  assert.deepEqual(requests.filter(item => item.method === "POST" && /-close-/.test(item.path)).map(item => item.path), ["/zentao/index.php/task-close-9000.json", "/zentao/index.php/execution-close-8001.json"]);
 });
