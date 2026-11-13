@@ -26,6 +26,12 @@ export const workflowTools = [
     comment: { type: "string", description: "关闭备注" },
     dryRun: { type: "boolean", default: true },
   }, ["executionId", "realEnd"]),
+  tool("close_project", "通过禅道正式流程关闭指定项目并回读；不查询、筛选或关闭其执行和任务，状态流转条件由服务端校验。默认仅预览，dryRun=false才写入，结果不明不自动重试", {
+    projectId: id,
+    realEnd: { type: "string", format: "date", description: "实际完成日期，YYYY-MM-DD" },
+    comment: { type: "string", description: "关闭备注" },
+    dryRun: { type: "boolean", default: true },
+  }, ["projectId", "realEnd"]),
   tool("get_project_team", "读取项目完整团队的账号、角色、工时等，不使用列表中的空成员占位", { projectId: id }),
   tool("get_execution_team", "读取执行完整团队的账号、角色、工时等", { executionId: id }),
   tool("update_project_settings", "维护Scrum项目的预算、可用工作日和权限继承，保留其他字段及产品；默认只预览，dryRun=false才保存并回读", {
@@ -92,18 +98,20 @@ const signature = (members) => JSON.stringify([...members].sort((a, b) => a.acco
 const account = (value) => typeof value === "string" ? value : value?.account ?? "";
 
 async function closeObject(type, args, request, nativeRequest) {
-  const idKey = type === "task" ? "taskId" : "executionId";
+  const idKey = `${type}Id`;
   const objectId = args[idKey];
-  if (type === "execution") validateData({ realEnd: args.realEnd }, { realEnd: { type: "string", format: "date" } });
-  const path = `/${type === "task" ? "tasks" : "executions"}/${objectId}`;
+  const hasRealEnd = type !== "task";
+  if (hasRealEnd) validateData({ realEnd: args.realEnd }, { realEnd: { type: "string", format: "date" } });
+  const path = `/${type}s/${objectId}`;
   const current = await request(path);
   objectMatches(current, type, objectId);
   const result = { [idKey]: objectId, name: current.name, previousStatus: current.status,
-    ...(type === "execution" ? { realEnd: args.realEnd } : {}), dryRun: args.dryRun !== false, written: false };
+    ...(hasRealEnd ? { realEnd: args.realEnd } : {}), dryRun: args.dryRun !== false, written: false };
   if (current.status === "closed") return { ...result, alreadyClosed: true, [type]: current };
   const view = await nativeRequest(type, "close", objectId);
   objectMatches(view?.[type], type, objectId);
-  const scopeFields = ["status", "project", "execution"];
+  const relationFields = ["project", "execution", ...(type === "project" ? ["parent"] : [])];
+  const scopeFields = ["status", ...relationFields];
   const changed = (object, fields) => fields.some(key => String(object[key] ?? "") !== String(current[key] ?? ""));
   if (changed(view[type], scopeFields)) throw new Error("对象已变化，请重新查询；未继续关闭");
   if (result.dryRun) return result;
@@ -111,13 +119,13 @@ async function closeObject(type, args, request, nativeRequest) {
   objectMatches(latest, type, objectId);
   if (changed(latest, [...scopeFields, "lastEditedDate"])) throw new Error("对象已变化，请重新查询；未继续关闭");
   const form = new URLSearchParams({ status: "closed", comment: args.comment ?? "" });
-  if (type === "execution") form.set("realEnd", args.realEnd);
+  if (hasRealEnd) form.set("realEnd", args.realEnd);
   try {
     await nativeRequest(type, "close", objectId, form);
     const saved = await request(path);
     objectMatches(saved, type, objectId);
-    if (saved.status !== "closed" || changed(saved, ["project", "execution"]) ||
-        (type === "execution" && String(saved.realEnd ?? "").slice(0, 10) !== args.realEnd)) throw new Error("关闭后的状态、日期或所属对象回读不一致");
+    if (saved.status !== "closed" || changed(saved, relationFields) ||
+        (hasRealEnd && String(saved.realEnd ?? "").slice(0, 10) !== args.realEnd)) throw new Error("关闭后的状态、日期或所属对象回读不一致");
     return { ...result, written: true, verified: true, [type]: saved };
   } catch (error) {
     throw new Error(`关闭结果可能已生效，请只读核实，不要盲目重试：${error.message}`);
@@ -256,6 +264,7 @@ export async function callWorkflowTool(name, args, request, nativeRequest) {
   if (name === "get_execution") return request(`/executions/${args.executionId}`);
   if (name === "close_task") return closeObject("task", args, request, nativeRequest);
   if (name === "close_execution") return closeObject("execution", args, request, nativeRequest);
+  if (name === "close_project") return closeObject("project", args, request, nativeRequest);
   if (name === "get_project_team") return team("project", args.projectId, nativeRequest);
   if (name === "get_execution_team") return team("execution", args.executionId, nativeRequest);
   if (name === "update_project_settings") return updateProjectSettings(args, request, nativeRequest);

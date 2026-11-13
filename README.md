@@ -165,16 +165,16 @@ Bug 的部分修改会先读取原记录，保留 API 要求的 title、severity
 
 解决前使用 `get_bug` 核对目标和状态，解决后再次查询核实。结果不明时先读回，不盲目重试。此工具使用已有解决版本，不包含附件上传或新建版本功能。参见[官方 API v1 解决Bug接口](https://www.zentao.net/book/api/1181.html)。
 
-### 5. 关闭任务与执行
+### 5. 关闭任务、执行与项目
 
-`close_task(taskId, comment?, dryRun?)` 和 `close_execution(executionId, realEnd, comment?, dryRun?)` 是独立的通用操作，分别通过禅道17.0原生关闭流程关闭指定任务或执行。关闭任务不联动执行，关闭执行不查询、筛选或自动关闭其任务。权限及可进行的状态流转由禅道服务端校验。
+`close_task(taskId, comment?, dryRun?)`、`close_execution(executionId, realEnd, comment?, dryRun?)` 和 `close_project(projectId, realEnd, comment?, dryRun?)` 是独立的通用操作，分别通过禅道17.0原生关闭流程关闭指定任务、执行或项目。每个工具只处理指定对象，不查询、筛选或自动关闭关联的任务、执行及项目。权限及可进行的状态流转由禅道服务端校验。
 
-默认 `dryRun=true` 只预览，传 `dryRun=false` 才写入并回读状态；已关闭对象不重复写入。关闭执行时 `realEnd` 必填，格式为 `YYYY-MM-DD`。结果不明时先查询核实，不自动重试。
+默认 `dryRun=true` 只预览，传 `dryRun=false` 才写入并回读状态；已关闭对象不重复写入。关闭执行和项目时 `realEnd` 必填，格式为 `YYYY-MM-DD`，写入后同时核对实际完成日期。项目关闭核对其项目类型和所属项目集，拒绝把执行或项目集当作项目。结果不明时先查询核实，不自动重试。
 
-MCP负责认证、参数校验、服务端协议适配和结果核实。业务范围、任务完成定义、空执行是否处理，以及是否先关闭任务再关闭执行，由调用方的 agent skill 或应用编排决定。工具不内置“非标项目”“仅全部任务结束才可关闭”等特定业务策略。
+MCP负责认证、参数校验、服务端协议适配和结果核实。业务范围、任务完成定义、空执行是否处理及跨对象关闭顺序，由调用方的 agent skill 或应用编排决定。非标交付的关闭顺序保留在 `zentao-nonstandard-delivery` 技能中，工具不内置“非标项目”“仅全部任务结束才可关闭”等特定业务策略。
 
 ```json
-{ "executionId": 123, "realEnd": "2026-11-13", "dryRun": true }
+{ "projectId": 123, "realEnd": "2026-11-13", "dryRun": true }
 ```
 
 ### 6. 验证

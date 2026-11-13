@@ -56,17 +56,18 @@ before(async () => {
       const [, module, action, rawId] = nativeRoute;
       const objectId = Number(rawId);
       if (objectId === 999) { response.writeHead(200, { "Content-Type": "text/html" }); return response.end('<form id="loginForm">login</form>'); }
-      if (["execution", "task"].includes(module) && action === "close") {
-        const record = records[module === "execution" ? "executions" : "tasks"].get(objectId);
+      if (["project", "execution", "task"].includes(module) && action === "close") {
+        const record = records[`${module}s`].get(objectId);
         if (!record) return send(404, { error: "not found" });
+        if (record.closeUnauthorized) return send(403, { error: "无关闭权限" });
         if (request.method === "GET") return send(200, { status: "success", data: JSON.stringify({ [module]: record }) });
         if (module === "task") {
           assert.equal(body.status, "closed");
           Object.assign(record, { closedReason: record.status === "cancel" ? "cancel" : "done", status: body.status });
         }
         else {
-          if (record.closeDenied) return send(200, { result: "fail", message: "服务端不允许关闭此执行" });
-          Object.assign(record, { status: body.status, realEnd: body.realEnd });
+          if (record.closeDenied) return send(200, { result: "fail", message: `服务端不允许关闭此${module === "project" ? "项目" : "执行"}` });
+          if (!record.closeNoSave) Object.assign(record, { status: body.status, realEnd: body.realEnd });
         }
         response.writeHead(200, { "Content-Type": "text/html" });
         return response.end('<script>parent.location.reload();</script>');
@@ -550,4 +551,69 @@ test("空执行可以通过MCP交由服务端关闭，服务端拒绝时返回�
     assert.equal(requests.slice(start).filter(item => item.method === "POST").length, 1);
     if (closeDenied) assert.match(result.content[0].text, /服务端不允许关闭此执行/);
   }
+});
+
+test("MCP暴露独立项目关闭，默认预览并保存回读，不查询或关闭执行与任务", async () => {
+  const schema = (await client.listTools()).tools.find(tool => tool.name === "close_project").inputSchema;
+  assert.deepEqual(schema.required, ["projectId", "realEnd"]);
+  assert.equal(schema.properties.dryRun.default, true);
+  assert.equal(schema.additionalProperties, false);
+  records.projects.set(9300, { id: 9300, type: "project", project: 0, parent: 9, name: "通用项目", status: "doing", realEnd: null, budget: "100", PM: "owner", deleted: false });
+  records.executions.set(8300, { id: 8300, project: 9300, type: "sprint", status: "doing", deleted: false });
+  records.tasks.set(9400, { id: 9400, execution: 8300, status: "wait", deleted: false });
+  const args = { projectId: 9300, realEnd: "2026-11-13" };
+  const start = requests.length;
+  const preview = await call("close_project", args);
+  assert.equal(preview.dryRun, true);
+  assert.equal(preview.written, false);
+  assert.equal(requests.slice(start).some(item => item.method === "POST"), false);
+  const result = await call("close_project", { ...args, comment: "交付关闭", dryRun: false });
+  assert.equal(result.verified, true);
+  const saved = await call("get_project", { projectId: 9300 });
+  assert.equal(saved.status, "closed");
+  assert.equal(saved.realEnd, args.realEnd);
+  assert.equal(saved.parent, 9);
+  assert.equal(saved.budget, "100");
+  assert.equal(saved.PM, "owner");
+  assert.equal(records.executions.get(8300).status, "doing");
+  assert.equal(records.tasks.get(9400).status, "wait");
+  const trace = requests.slice(start);
+  assert.equal(trace.some(item => /execution|task/.test(item.path)), false);
+  const writes = trace.filter(item => item.method === "POST");
+  assert.deepEqual(writes.map(item => item.path), ["/zentao/index.php/project-close-9300.json"]);
+  assert.deepEqual(writes[0].body, { status: "closed", comment: "交付关闭", realEnd: args.realEnd });
+  const repeated = await call("close_project", { ...args, realEnd: "2026-11-12", dryRun: false });
+  assert.equal(repeated.alreadyClosed, true);
+  assert.equal(repeated.written, false);
+  assert.equal(repeated.project.realEnd, args.realEnd);
+  assert.equal(requests.slice(start).filter(item => item.method === "POST").length, 1);
+});
+
+test("MCP项目关闭的权限拒绝、业务拒绝及保存失败均如实失败且不重试", async () => {
+  for (const [projectId, flags, expectedPosts, message] of [
+    [9301, { closeUnauthorized: true }, 0, /403/],
+    [9302, { closeDenied: true }, 1, /服务端不允许关闭此项目/],
+    [9303, { closeNoSave: true }, 1, /回读不一致/],
+  ]) {
+    records.projects.set(projectId, { id: projectId, type: "project", parent: 9, name: "失败项目", status: "doing", realEnd: null, deleted: false, ...flags });
+    const start = requests.length;
+    const response = await client.callTool({ name: "close_project", arguments: { projectId, realEnd: "2026-11-13", dryRun: false } });
+    assert.equal(response.isError, true);
+    assert.match(response.content[0].text, message);
+    assert.equal(records.projects.get(projectId).status, "doing");
+    assert.equal(requests.slice(start).filter(item => item.method === "POST").length, expectedPosts);
+  }
+});
+
+test("MCP项目关闭在发送请求前拒绝非法日期和越界字段", async () => {
+  const beforeCount = requests.length;
+  for (const args of [
+    { projectId: 9300 },
+    { projectId: 9300, realEnd: "2026-02-30" },
+    { projectId: 9300, realEnd: "2026-11-13", deleted: true },
+    { projectId: "9300/delete", realEnd: "2026-11-13" },
+  ]) {
+    assert.equal((await client.callTool({ name: "close_project", arguments: args })).isError, true);
+  }
+  assert.equal(requests.length, beforeCount);
 });
