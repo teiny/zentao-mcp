@@ -62,10 +62,10 @@ before(async () => {
         if (request.method === "GET") return send(200, { status: "success", data: JSON.stringify({ [module]: record }) });
         if (module === "task") {
           assert.equal(body.status, "closed");
-          Object.assign(record, { status: body.status, closedReason: "done" });
+          Object.assign(record, { closedReason: record.status === "cancel" ? "cancel" : "done", status: body.status });
         }
         else {
-          assert.equal([...records.tasks.values()].some(task => task.execution === objectId && task.status === "done"), false);
+          if (record.closeDenied) return send(200, { result: "fail", message: "服务端不允许关闭此执行" });
           Object.assign(record, { status: body.status, realEnd: body.realEnd });
         }
         response.writeHead(200, { "Content-Type": "text/html" });
@@ -505,24 +505,49 @@ test("附件不修改多人、父子和已结束任务，预检查失败不发�
   assert.equal(requests.filter((item) => item.method !== "GET").length, writes);
 });
 
-test("关闭执行通过MCP分页检查；不满足条件不碰任务，满足后先关done任务并正式关闭执行", async () => {
-  records.executions.set(8001, { id: 8001, project: 20, type: "sprint", name: "可关闭执行", status: "doing", realEnd: null, deleted: false });
-  for (let index = 0; index < 101; index++) records.tasks.set(9000 + index, { id: 9000 + index, execution: 8001, status: index === 0 ? "done" : index === 100 ? "wait" : "closed", deleted: false });
+test("MCP关闭执行不查询或修改任务，未完成任务的处理策略由调用方决定", async () => {
+  records.executions.set(8001, { id: 8001, project: 20, type: "sprint", name: "通用执行", status: "doing", realEnd: null, deleted: false });
+  records.tasks.set(9000, { id: 9000, execution: 8001, status: "done", deleted: false });
+  records.tasks.set(9100, { id: 9100, execution: 8001, status: "wait", deleted: false });
   const args = { executionId: 8001, realEnd: "2026-11-13" };
-  const writes = requests.filter(item => item.method !== "GET").length;
-  const blocked = await client.callTool({ name: "close_execution", arguments: { ...args, dryRun: false } });
-  assert.equal(blocked.isError, true);
-  assert.equal(records.tasks.get(9000).status, "done");
-  assert.equal(requests.filter(item => item.method !== "GET").length, writes);
-  records.tasks.get(9100).status = "cancel";
-  assert.deepEqual((await call("close_execution", args)).tasksToClose, [9000]);
-  assert.equal(requests.filter(item => item.method !== "GET").length, writes);
+  const start = requests.length;
+  const preview = await call("close_execution", args);
+  assert.equal(preview.dryRun, true);
+  assert.equal(preview.written, false);
   const result = await call("close_execution", { ...args, dryRun: false });
   assert.equal(result.verified, true);
-  assert.deepEqual(result.closedTaskIds, [9000]);
-  assert.equal(records.tasks.get(9100).status, "cancel");
-  const saved = await call("get_execution", { executionId: 8001 });
-  assert.equal(saved.status, "closed");
-  assert.equal(saved.realEnd, args.realEnd);
-  assert.deepEqual(requests.filter(item => item.method === "POST" && /-close-/.test(item.path)).map(item => item.path), ["/zentao/index.php/task-close-9000.json", "/zentao/index.php/execution-close-8001.json"]);
+  assert.equal(result.execution.status, "closed");
+  assert.equal(result.execution.realEnd, args.realEnd);
+  assert.equal(records.tasks.get(9000).status, "done");
+  assert.equal(records.tasks.get(9100).status, "wait");
+  const trace = requests.slice(start);
+  assert.equal(trace.some(item => item.path.includes("/tasks") || item.path.includes("task-close")), false);
+  assert.deepEqual(trace.filter(item => item.method === "POST").map(item => item.path), ["/zentao/index.php/execution-close-8001.json"]);
+});
+
+test("MCP提供独立任务关闭，关闭原因沿用服务端结果且不关闭执行", async () => {
+  records.executions.set(8002, { id: 8002, project: 20, type: "sprint", name: "所属执行", status: "doing", deleted: false });
+  const start = requests.length;
+  for (const [taskId, status] of [[9200, "done"], [9201, "cancel"]]) {
+    records.tasks.set(taskId, { id: taskId, execution: 8002, status, deleted: false });
+    assert.equal((await call("close_task", { taskId })).written, false);
+    const result = await call("close_task", { taskId, comment: "关闭备注", dryRun: false });
+    assert.equal(result.verified, true);
+    assert.equal(result.task.status, "closed");
+    assert.equal(result.task.closedReason, status === "cancel" ? "cancel" : "done");
+  }
+  assert.equal(records.executions.get(8002).status, "doing");
+  assert.deepEqual(requests.slice(start).filter(item => item.method === "POST").map(item => item.path), ["/zentao/index.php/task-close-9200.json", "/zentao/index.php/task-close-9201.json"]);
+});
+
+test("空执行可以通过MCP交由服务端关闭，服务端拒绝时返回失败且不自动重试", async () => {
+  for (const [executionId, closeDenied] of [[8003, false], [8004, true]]) {
+    records.executions.set(executionId, { id: executionId, project: 20, type: "sprint", name: "空执行", status: "wait", realEnd: null, deleted: false, closeDenied });
+    const start = requests.length;
+    const result = await client.callTool({ name: "close_execution", arguments: { executionId, realEnd: "2026-11-13", dryRun: false } });
+    assert.equal(result.isError ?? false, closeDenied);
+    assert.equal(records.executions.get(executionId).status, closeDenied ? "wait" : "closed");
+    assert.equal(requests.slice(start).filter(item => item.method === "POST").length, 1);
+    if (closeDenied) assert.match(result.content[0].text, /服务端不允许关闭此执行/);
+  }
 });

@@ -165,11 +165,13 @@ Bug 的部分修改会先读取原记录，保留 API 要求的 title、severity
 
 解决前使用 `get_bug` 核对目标和状态，解决后再次查询核实。结果不明时先读回，不盲目重试。此工具使用已有解决版本，不包含附件上传或新建版本功能。参见[官方 API v1 解决Bug接口](https://www.zentao.net/book/api/1181.html)。
 
-### 5. 关闭执行
+### 5. 关闭任务与执行
 
-`close_execution(executionId, realEnd, comment?, dryRun?)` 先分页检查执行的全部任务，仅接受 `done`（已完成）、`closed`（已关闭）、`cancel`（已取消），空执行不能关闭。任何一条任务不满足条件时，整个执行及其任务均不写入。
+`close_task(taskId, comment?, dryRun?)` 和 `close_execution(executionId, realEnd, comment?, dryRun?)` 是独立的通用操作，分别通过禅道17.0原生关闭流程关闭指定任务或执行。关闭任务不联动执行，关闭执行不查询、筛选或自动关闭其任务。权限及可进行的状态流转由禅道服务端校验。
 
-默认 `dryRun=true` 只预览，返回任务统计和待关闭的已完成任务ID。明确授权后传 `dryRun=false`：先通过禅道17.0原生关闭流程将 `done` 任务关闭并回读，保留已关闭和已取消任务，再重新核对全部任务并关闭执行、回读状态及实际完成日期。`realEnd` 必填，格式为 `YYYY-MM-DD`。任务关闭失败时不继续关闭执行；操作可能部分生效，先查询核实，不自动重试。
+默认 `dryRun=true` 只预览，传 `dryRun=false` 才写入并回读状态；已关闭对象不重复写入。关闭执行时 `realEnd` 必填，格式为 `YYYY-MM-DD`。结果不明时先查询核实，不自动重试。
+
+MCP负责认证、参数校验、服务端协议适配和结果核实。业务范围、任务完成定义、空执行是否处理，以及是否先关闭任务再关闭执行，由调用方的 agent skill 或应用编排决定。工具不内置“非标项目”“仅全部任务结束才可关闭”等特定业务策略。
 
 ```json
 { "executionId": 123, "realEnd": "2026-11-13", "dryRun": true }

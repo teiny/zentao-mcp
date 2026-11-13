@@ -2,112 +2,114 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { callWorkflowTool } from "../src/workflow-tools.js";
 
-const input = { executionId: 2, realEnd: "2026-11-13", dryRun: false, comment: "任务已结束，关闭执行" };
-function backend({ statuses = ["done", "closed", "cancel"], status = "doing", pageFault, taskFailure = false, noSave = false, formId = 2 } = {}) {
-  const execution = { id: 2, type: "sprint", project: 1, name: "执行", status, realEnd: null, deleted: false };
-  const tasks = statuses.map((status, index) => ({ id: index + 10, execution: 2, status, closedReason: status === "closed" ? "done" : "", deleted: false }));
+const executionArgs = { executionId: 2, realEnd: "2026-11-13", dryRun: false, comment: "关闭执行" };
+const taskArgs = { taskId: 10, dryRun: false, comment: "关闭任务" };
+function backend({ executionStatus = "doing", taskStatus = "done", failure = false, noSave = false, wrongId = false, changed = false, deleted = false } = {}) {
+  const records = {
+    execution: { id: 2, type: "sprint", project: 77, name: "执行", status: executionStatus, realEnd: null, deleted, lastEditedDate: "2026-11-13T01:00:00Z" },
+    task: { id: 10, execution: 2, project: 77, name: "任务", status: taskStatus, closedReason: "", deleted, lastEditedDate: "2026-11-13T01:00:00Z" },
+  };
+  const reads = [];
   const writes = [];
-  const pages = [];
   const request = async path => {
-    if (path === "/executions/2") return { ...execution };
-    if (/^\/tasks\/\d+$/.test(path)) return { ...tasks.find(task => task.id === Number(path.split("/").at(-1))) };
-    const url = new URL(path, "http://mock");
-    assert.equal(url.pathname, "/executions/2/tasks");
-    const page = Number(url.searchParams.get("page"));
-    const limit = Number(url.searchParams.get("limit"));
-    pages.push(page);
-    const rows = structuredClone(tasks.slice((page - 1) * limit, page * limit));
-    const list = { tasks: rows, page, limit, total: tasks.length };
-    return pageFault ? pageFault(list) : list;
+    reads.push(path);
+    const type = path === "/executions/2" ? "execution" : path === "/tasks/10" ? "task" : null;
+    assert.ok(type, "通用关闭工具不能查询任务列表或关联项目以套用业务条件");
+    const count = reads.filter(item => item === path).length;
+    return { ...records[type], ...(changed && count === 2 ? { lastEditedDate: "2026-11-13T02:00:00Z" } : {}) };
   };
   const native = async (type, action, id, body) => {
     assert.equal(action, "close");
-    if (!body) return type === "execution" ? { execution: { ...execution, id: formId } } : { task: { ...tasks.find(task => task.id === id) } };
+    assert.equal(id, records[type].id);
+    if (!body) return { [type]: { ...records[type], ...(wrongId ? { id: 99 } : {}) } };
     writes.push({ type, id, body });
-    if (type === "task") {
-      if (taskFailure) throw new Error("任务关闭响应超时");
-      Object.assign(tasks.find(task => task.id === id), { status: "closed", closedReason: "done" });
-    } else if (!noSave) {
-      assert.equal(tasks.some(task => task.status === "done"), false, "关闭执行之前必须关闭done任务");
-      Object.assign(execution, { status: body.get("status"), realEnd: body.get("realEnd") });
+    if (failure) throw new Error("服务端拒绝关闭");
+    if (!noSave) {
+      const before = records[type].status;
+      Object.assign(records[type], { status: body.get("status") });
+      if (type === "execution") records[type].realEnd = body.get("realEnd");
+      else records.task.closedReason = before === "cancel" ? "cancel" : "done";
     }
   };
-  return { request, native, writes, pages, tasks };
+  return { request, native, reads, writes, records };
 }
-const close = b => callWorkflowTool("close_execution", input, b.request, b.native);
+const closeExecution = b => callWorkflowTool("close_execution", executionArgs, b.request, b.native);
+const closeTask = b => callWorkflowTool("close_task", taskArgs, b.request, b.native);
 
-test("预览不写入，满足条件时先正式关闭done任务再关闭执行并回读", async () => {
-  const b = backend();
-  const preview = await callWorkflowTool("close_execution", { executionId: 2, realEnd: input.realEnd }, b.request, b.native);
-  assert.equal(preview.dryRun, true);
-  assert.deepEqual(preview.tasksToClose, [10]);
-  assert.equal(b.writes.length, 0);
-  const result = await close(b);
-  assert.equal(result.verified, true);
-  assert.deepEqual(result.closedTaskIds, [10]);
-  assert.deepEqual(b.writes.map(write => [write.type, write.id]), [["task", 10], ["execution", 2]]);
-  assert.equal(b.writes[0].body.get("comment"), input.comment);
-  assert.equal(b.writes[0].body.get("status"), "closed");
-  assert.equal(b.writes[1].body.get("realEnd"), input.realEnd);
-  assert.deepEqual(b.tasks.map(task => task.status), ["closed", "closed", "cancel"]);
+test("关闭执行只处理指定执行，不查询任务清单、不自动关闭done或其他状态的任务", async () => {
+  for (const taskStatus of ["done", "wait", "doing", "pause", "cancel"]) {
+    const b = backend({ taskStatus });
+    const result = await closeExecution(b);
+    assert.equal(result.verified, true);
+    assert.equal(result.execution.status, "closed");
+    assert.equal(result.execution.project, 77);
+    assert.equal(b.records.task.status, taskStatus);
+    assert.deepEqual(b.writes.map(write => [write.type, write.id]), [["execution", 2]]);
+    assert.equal(b.writes[0].body.get("realEnd"), executionArgs.realEnd);
+  }
 });
 
-test("超过100条任务读取全部分页，第二页存在未结束任务时连第一页done任务也不关闭", async () => {
-  const statuses = ["done", ...Array(100).fill("closed")];
-  const b = backend({ statuses });
-  assert.equal((await close(b)).taskCount, 101);
-  assert.deepEqual(b.pages, [1, 2, 1, 2]);
-  statuses[100] = "wait";
-  const blocked = backend({ statuses });
-  await assert.rejects(close(blocked), /只允许done、closed、cancel/);
-  assert.deepEqual(blocked.pages, [1, 2]);
-  assert.equal(blocked.writes.length, 0);
-  assert.equal(blocked.tasks[0].status, "done");
+test("空执行和服务端允许关闭的状态不被MCP附加业务规则拦截", async () => {
+  for (const executionStatus of ["wait", "suspended", "server-custom-status"]) {
+    const b = backend({ executionStatus });
+    delete b.records.task;
+    assert.equal((await closeExecution(b)).verified, true);
+    assert.deepEqual(b.writes.map(write => write.type), ["execution"]);
+  }
 });
 
-test("空执行、wait/doing/pause和未知任务状态均不修改任何任务或执行", async () => {
-  for (const statuses of [[], ...["wait", "doing", "pause", "unknown"].map(status => ["done", status])]) {
-    const b = backend({ statuses });
-    await assert.rejects(close(b));
+test("任务可以独立关闭，取消任务的关闭原因由服务端决定，不联动所属执行", async () => {
+  for (const taskStatus of ["done", "cancel"]) {
+    const b = backend({ taskStatus });
+    const result = await closeTask(b);
+    assert.equal(result.verified, true);
+    assert.equal(result.task.status, "closed");
+    assert.equal(result.task.closedReason, taskStatus === "cancel" ? "cancel" : "done");
+    assert.equal(b.records.execution.status, "doing");
+    assert.deepEqual(b.writes.map(write => [write.type, write.id]), [["task", 10]]);
+    assert.equal(b.writes[0].body.get("status"), "closed");
+    assert.equal(b.writes[0].body.get("comment"), taskArgs.comment);
+  }
+});
+
+test("两个关闭工具默认仅预览；已关闭对象不重复写入", async () => {
+  for (const [name, args, key] of [["close_execution", executionArgs, "execution"], ["close_task", taskArgs, "task"]]) {
+    const b = backend();
+    const { dryRun, ...previewArgs } = args;
+    const preview = await callWorkflowTool(name, previewArgs, b.request, b.native);
+    assert.equal(preview.dryRun, true);
+    assert.equal(preview.written, false);
+    assert.equal(b.writes.length, 0);
+    b.records[key].status = "closed";
+    const result = await callWorkflowTool(name, args, b.request, b.native);
+    assert.equal(result.alreadyClosed, true);
     assert.equal(b.writes.length, 0);
   }
 });
 
-test("分页重复、漏项、总数变化和错误对象均在写入前阻止", async () => {
-  for (const pageFault of [
-    list => ({ ...list, tasks: [list.tasks[0], list.tasks[0], list.tasks[2]] }),
-    list => ({ ...list, tasks: list.tasks.slice(1) }),
-    list => ({ ...list, tasks: list.tasks.map(task => ({ ...task, execution: 99 })) }),
-    list => ({ ...list, tasks: list.tasks.map(task => ({ ...task, deleted: true })) }),
-  ]) {
-    const b = backend({ pageFault });
-    await assert.rejects(close(b));
-    assert.equal(b.writes.length, 0);
+test("对象不匹配、删除标记和并发修改在写入前阻止；服务端拒绝和回读失败不重试", async () => {
+  for (const close of [closeExecution, closeTask]) {
+    for (const options of [{ wrongId: true }, { deleted: true }, { changed: true }]) {
+      const b = backend(options);
+      await assert.rejects(close(b));
+      assert.equal(b.writes.length, 0);
+    }
+    for (const options of [{ failure: true }, { noSave: true }]) {
+      const b = backend(options);
+      await assert.rejects(close(b), /只读核实.*不要盲目重试/);
+      assert.equal(b.writes.length, 1);
+    }
   }
-  const changed = backend({ statuses: Array(101).fill("closed"), pageFault: list => ({ ...list, total: list.page === 2 ? 102 : 101 }) });
-  await assert.rejects(close(changed), /总数已变化/);
-  assert.equal(changed.writes.length, 0);
-  const wrong = backend({ formId: 3 });
-  await assert.rejects(close(wrong), /对象ID或类型不匹配/);
-  assert.equal(wrong.writes.length, 0);
 });
 
-test("任务关闭失败不关闭执行，执行回读失败不盲目重试；已关闭执行不再写入", async () => {
-  const failed = backend({ taskFailure: true });
-  await assert.rejects(close(failed), /可能部分生效.*不要盲目重试/);
-  assert.deepEqual(failed.writes.map(write => write.type), ["task"]);
-  const b = backend({ noSave: true });
-  await assert.rejects(close(b), /不要盲目重试/);
-  assert.equal(b.writes.length, 2);
-  const closed = backend({ status: "closed" });
-  assert.equal((await close(closed)).alreadyClosed, true);
-  assert.equal(closed.writes.length, 0);
-});
-
-test("未开始和已挂起执行可正常关闭，无效日期、删除及未知参数不发送请求", async () => {
-  for (const status of ["wait", "suspended"]) assert.equal((await close(backend({ status }))).verified, true);
-  const never = async () => assert.fail("无效参数不应发送请求");
-  for (const args of [{ ...input, realEnd: "2026-02-30" }, { ...input, deleted: 1 }, { ...input, status: "deleted" }, { ...input, executionId: "2/delete" }]) {
-    await assert.rejects(callWorkflowTool("close_execution", args, never, never));
-  }
+test("非法日期、ID、删除字段和未知参数均不发送请求", async () => {
+  const never = async () => assert.fail("非法参数不应发送请求");
+  for (const [name, args] of [
+    ["close_execution", { ...executionArgs, realEnd: "2026-02-30" }],
+    ["close_execution", { ...executionArgs, executionId: "2/delete" }],
+    ["close_execution", { ...executionArgs, tasksToClose: [10] }],
+    ["close_task", { ...taskArgs, taskId: 0 }],
+    ["close_task", { ...taskArgs, deleted: 1 }],
+    ["close_task", { ...taskArgs, status: "deleted" }],
+  ]) await assert.rejects(callWorkflowTool(name, args, never, never));
 });
