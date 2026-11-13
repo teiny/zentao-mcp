@@ -25,7 +25,7 @@ async function apiRequest(endpoint, method = "GET", body = null) {
 
 // 仅供专用工具使用的17.0原生JSON表单接口，不向调用者开放任意路由。
 async function nativeRequest(module, action, objectId, body = null) {
-  const allowed = { execution: ["close"], task: ["close"] };
+  const allowed = { project: ["team", "manageMembers", "edit"], execution: ["team", "manageMembers", "close"], task: ["edit", "close"] };
   if (!Object.hasOwn(allowed, module) || !allowed[module].includes(action)) throw new Error("不支持的原生接口");
   positiveId(objectId, "objectId");
   return sendRequest(`/index.php/${module}-${action}-${objectId}.json`, body === null ? "GET" : "POST", body, true);
@@ -53,7 +53,7 @@ async function sendRequest(path, method, body, native = false) {
     signal: AbortSignal.timeout(30000),
   };
 
-  if (body instanceof URLSearchParams) {
+  if (body instanceof FormData || body instanceof URLSearchParams) {
     options.body = body;
   } else if (body) {
     options.headers["Content-Type"] = "application/json";
@@ -75,7 +75,7 @@ async function sendRequest(path, method, body, native = false) {
     const raw = await response.text();
     let result;
     try { result = JSON.parse(raw); } catch {
-      // 原生关闭成功可返回跳转脚本；只接受已知跳转标记，调用者仍须回读验证。
+      // 原生成员维护/编辑成功可返回跳转脚本；只接受已知跳转标记，调用者仍须回读验证。
       if (native && method === "POST" && /<script\b/i.test(raw) && /(?:location|reload)/i.test(raw) && !/(?:alert\s*\(|user[-/]login|loginForm)/i.test(raw)) {
         return { responseReceived: true, verified: false };
       }

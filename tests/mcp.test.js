@@ -4,6 +4,9 @@ import { createServer } from "node:http";
 import { createConnection } from "node:net";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
+import { mkdtemp, writeFile, unlink, rmdir } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -17,14 +20,29 @@ let client;
 let transport;
 let child;
 let port;
+let attachmentPath;
+let fixtureDirectory;
+const member = (account, role = "开发") => ({ account, realname: account, role, days: 10, hours: 8, limited: "no", join: "2026-01-01" });
+const teams = new Map([["project:10", [member("alice"), member("bob")]], ["project:20", [{ ...member("alice", "负责人"), days: 5 }]]]);
 
 before(async () => {
+  fixtureDirectory = await mkdtemp(join(tmpdir(), "zentao-mcp-test-"));
+  attachmentPath = join(fixtureDirectory, "立项单.pdf");
+  await writeFile(attachmentPath, "%PDF-1.4\nmock attachment\n");
+  records.projects.set(10, { id: 10, type: "project", days: 10, deleted: false });
+  records.projects.set(20, { id: 20, type: "project", days: 5, deleted: false });
+  records.projects.set(30, { id: 30, type: "project", model: "scrum", name: "项目设置", code: "settings", team: "原团队", parent: 9, begin: "2026-11-06", end: "2026-11-26", days: 0, budget: "0", budgetUnit: "CNY", desc: "原描述", PM: "owner", auth: "", acl: "open", whitelist: [], deleted: false });
   api = createServer(async (request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
     const path = url.pathname.replace(/^\/zentao\/api\.php\/v1/, "");
-    let text = "";
-    for await (const chunk of request) text += chunk;
-    const body = !text ? undefined : request.headers["content-type"]?.startsWith("application/x-www-form-urlencoded") ? Object.fromEntries(new URLSearchParams(text)) : JSON.parse(text);
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const raw = Buffer.concat(chunks);
+    const contentType = request.headers["content-type"] || "";
+    let body;
+    if (raw.length && /multipart\/form-data|application\/x-www-form-urlencoded/.test(contentType)) {
+      body = Object.fromEntries(await new Response(raw, { headers: { "Content-Type": contentType } }).formData());
+    } else body = raw.length ? JSON.parse(raw.toString()) : undefined;
     requests.push({ method: request.method, path, query: Object.fromEntries(url.searchParams), body, cookie: request.headers.cookie });
     const send = (status, data) => {
       response.writeHead(status, { "Content-Type": "application/json" });
@@ -33,11 +51,11 @@ before(async () => {
     if (request.headers.cookie !== "zentaosid=test-session") {
       return send(401, { error: "unauthorized" });
     }
-    const nativeRoute = url.pathname.match(/^\/zentao\/index\.php\/(execution|task)-close-(\d+)\.json$/);
+    const nativeRoute = url.pathname.match(/^\/zentao\/index\.php\/(project|execution|task)-(team|manageMembers|edit|close)-(\d+)\.json$/);
     if (nativeRoute) {
-      const [, module, rawId] = nativeRoute;
-      const action = "close";
+      const [, module, action, rawId] = nativeRoute;
       const objectId = Number(rawId);
+      if (objectId === 999) { response.writeHead(200, { "Content-Type": "text/html" }); return response.end('<form id="loginForm">login</form>'); }
       if (["execution", "task"].includes(module) && action === "close") {
         const record = records[module === "execution" ? "executions" : "tasks"].get(objectId);
         if (!record) return send(404, { error: "not found" });
@@ -53,7 +71,50 @@ before(async () => {
         response.writeHead(200, { "Content-Type": "text/html" });
         return response.end('<script>parent.location.reload();</script>');
       }
+      if (["project", "execution"].includes(module) && action === "team") {
+        const teamMembers = teams.get(`${module}:${objectId}`) ?? [];
+        return send(200, { status: "success", data: JSON.stringify({ projectID: objectId, execution: { id: objectId }, teamMembers }) });
+      }
+      if (["project", "execution"].includes(module) && action === "manageMembers" && request.method === "POST") {
+        const saved = [];
+        for (let index = 0; body[`accounts[${index}]`] !== undefined; index++) {
+          saved.push({ account: body[`accounts[${index}]`], role: body[`roles[${index}]`], days: Number(body[`days[${index}]`]), hours: Number(body[`hours[${index}]`]), limited: body[`limited[${index}]`] });
+        }
+        teams.set(`${module}:${objectId}`, saved);
+        response.writeHead(200, { "Content-Type": "text/html" });
+        return response.end('<script>parent.location="team";</script>');
+      }
+      if (module === "project" && action === "edit") {
+        const record = records.projects.get(objectId);
+        if (!record) return send(404, { error: "not found" });
+        if (request.method === "GET") return send(200, { status: "success", data: JSON.stringify({ project: record, linkedProducts: { 7: { id: 7, type: "normal" } } }) });
+        assert.equal(body["products[]"], "7");
+        assert.equal(body.desc, "原描述");
+        assert.equal(body.PM, "owner");
+        Object.assign(record, { budget: body.budget, days: Number(body.days), auth: body.auth });
+        return send(200, { result: "success" });
+      }
+      if (module === "task" && action === "edit") {
+        const record = records.tasks.get(objectId);
+        if (!record) return send(404, { error: "not found" });
+        if (request.method === "GET") return send(200, { status: "success", data: JSON.stringify({ task: record }) });
+        const file = body["files[]"];
+        assert.equal(file.name, "立项单.pdf");
+        assert.equal(await file.text(), "%PDF-1.4\nmock attachment\n");
+        for (const key of ["name", "type", "desc", "status", "assignedTo", "estimate", "left", "consumed", "realStarted"]) assert.equal(String(body[key]), String(record[key]));
+        const fileId = nextId++;
+        record.files[fileId] = { id: fileId, title: file.name, size: file.size, objectType: "task", objectID: objectId };
+        response.writeHead(200, { "Content-Type": "text/html" });
+        return response.end('<script>parent.location="task-view";</script>');
+      }
+      return send(404, { error: "unsupported native route" });
     }
+    const lists = {
+      "/products": ["products", 1], "/projects": ["projects", 101],
+      "/executions": ["executions", 2159], "/projects/121/executions": ["executions", 2159],
+      "/products/1/stories": ["stories", 301], "/products/1/bugs": ["bugs", 501],
+      "/executions/2159/tasks": ["tasks", 6866],
+    };
     const executionTasks = path.match(/^\/executions\/(\d+)\/tasks$/);
     if (request.method === "GET" && executionTasks && records.executions.has(Number(executionTasks[1]))) {
       const rows = [...records.tasks.values()].filter(task => task.execution === Number(executionTasks[1]));
@@ -61,13 +122,6 @@ before(async () => {
       const limit = Number(url.searchParams.get("limit") || 20);
       return send(200, { page, limit, total: rows.length, tasks: rows.slice((page - 1) * limit, page * limit) });
     }
-
-    const lists = {
-      "/products": ["products", 1], "/projects": ["projects", 101],
-      "/executions": ["executions", 2159], "/projects/121/executions": ["executions", 2159],
-      "/products/1/stories": ["stories", 301], "/products/1/bugs": ["bugs", 501],
-      "/executions/2159/tasks": ["tasks", 6866],
-    };
     if (request.method === "GET" && lists[path]) {
       const [key, firstId] = lists[path];
       const rows = Array.from({ length: 5 }, (_, index) => ({ id: firstId + index, name: `测试${key}${index}` }));
@@ -86,10 +140,14 @@ before(async () => {
     let parent = {};
     const bugParent = path.match(/^\/products\/(\d+)\/bugs$/);
     const taskParent = path.match(/^\/executions\/(\d+)\/tasks$/);
+    const executionParent = path.match(/^\/projects\/(\d+)\/executions$/);
     if (bugParent) { collection = "bugs"; parent = { product: Number(bugParent[1]) }; }
     if (taskParent) { collection = "tasks"; parent = { execution: Number(taskParent[1]) }; }
+    if (executionParent) { collection = "executions"; parent = { project: Number(executionParent[1]), type: "sprint" }; }
     if (request.method === "POST" && collection) {
       const record = { id: nextId++, ...(collection === "bugs" ? { status: "active" } : {}), ...parent, ...body };
+      if (collection === "projects") record.type = "project";
+      if (collection === "tasks") Object.assign(record, { status: "wait", desc: "", mode: "", team: [], parent: 0, pri: 3, estimate: 0, left: 0, consumed: 0, story: 0, module: 0, realStarted: "0000-00-00 00:00:00", files: {}, ...body, assignedTo: body.assignedTo[0] });
       records[collection].set(record.id, record);
       return send(201, record);
     }
@@ -154,6 +212,8 @@ after(async () => {
     });
   }
   console.log(JSON.stringify({ cleanup: true, pid: child?.pid, childExited: !child || child.exitCode !== null || child.signalCode !== null, mockPortReleased: !api?.listening }));
+  if (attachmentPath) await unlink(attachmentPath);
+  if (fixtureDirectory) await rmdir(fixtureDirectory);
 });
 
 async function call(name, args) {
@@ -225,7 +285,7 @@ test("六类列表默认分页和工具schema一致，项目执行也传递分�
   const executions = await call("get_executions", { projectId: 121, page: 2, limit: 2 });
   assert.equal(executions.executions[0].id, 2161);
   assert.equal(requests.at(-1).path, "/projects/121/executions");
-  assert.deepEqual(requests.at(-1).query, { page: "2", limit: "2" });
+  assert.deepEqual(requests.at(-1).query, { page: "2", limit: "2", status: "all" });
 });
 
 test("列表非法分页和范围ID不发送HTTP请求", async () => {
@@ -233,6 +293,7 @@ test("列表非法分页和范围ID不发送HTTP请求", async () => {
   for (const [name, args] of [
     ["get_products", { page: 0 }], ["get_projects", { page: 1.5 }],
     ["get_executions", { limit: 0 }], ["get_executions", { limit: 101 }],
+    ["get_executions", { status: null }], ["get_executions", { status: "deleted" }],
     ["get_requirements", { productId: 1, limit: "2" }],
     ["get_bugs", { productId: "1/delete" }], ["get_tasks", { executionId: 0 }],
   ]) {
@@ -257,7 +318,7 @@ for (const [tool, collection, idKey, data, patch] of examples) {
     const createRequest = requests.at(-1);
     assert.equal(createRequest.method, "POST");
     assert.equal(createRequest.path, tool === "bug" ? "/products/1/bugs" : tool === "task" ? "/executions/2159/tasks" : `/${collection}`);
-    assert.deepEqual(createRequest.body, data);
+    assert.deepEqual(createRequest.body, tool === "task" ? { ...data, assignedTo: [data.assignedTo] } : data);
     const read = await call(`get_${tool}`, { [idKey]: created.id });
     assert.equal(read.id, created.id);
     await call(`update_${tool}`, { [idKey]: created.id, data: patch });
@@ -341,6 +402,107 @@ test("HTTP认证错误及HTTP200业务错误返回失败且不显示会话值", 
     assert.equal(result.isError, true);
     assert.equal(JSON.stringify(result).includes("test-session"), false);
   }
+});
+
+test("执行通过MCP创建、详情、修改及回读，保留未指定负责人", async () => {
+  const data = { name: "新执行", code: "order-3", begin: "2026-11-13", end: "2026-11-26", days: 10, products: [7], PM: "" };
+  const created = await call("create_execution", { projectId: 20, data });
+  assert.equal(created.project, 20);
+  assert.equal(created.PM, "");
+  assert.equal(requests.at(-1).path, "/projects/20/executions");
+  await call("update_execution", { executionId: created.id, data: { desc: "执行说明", end: "2026-11-27" } });
+  const saved = await call("get_execution", { executionId: created.id });
+  assert.equal(saved.desc, "执行说明");
+  assert.equal(saved.end, "2026-11-27");
+  assert.equal(saved.begin, data.begin);
+});
+
+test("任务描述、空开始日期与未指派通过MCP保存及回读", async () => {
+  const created = await call("create_task", { executionId: 2159, data: { name: "待排期", type: "devel", desc: "非标编号 1119" } });
+  assert.equal(created.assignedTo, "");
+  assert.equal(created.estStarted, "");
+  assert.deepEqual(requests.at(-1).body.assignedTo, [""]);
+  await call("update_task", { taskId: created.id, data: { desc: "非标编号 1119\n需求内容", estStarted: "", assignedTo: "" } });
+  const saved = await call("get_task", { taskId: created.id });
+  assert.equal(saved.desc, "非标编号 1119\n需求内容");
+  assert.equal(saved.assignedTo, "");
+  assert.equal(saved.estStarted, "");
+});
+
+test("项目预算工作日和继承权限通过专用MCP维护并保留产品及其他字段", async () => {
+  const args = { projectId: 30, data: { budget: 10500, days: 15, auth: "extend" } };
+  const beforeWrites = requests.filter(item => item.method !== "GET").length;
+  assert.equal((await call("update_project_settings", args)).written, false);
+  assert.equal(requests.filter(item => item.method !== "GET").length, beforeWrites);
+  const result = await call("update_project_settings", { ...args, dryRun: false });
+  assert.equal(result.verified, true);
+  const saved = await call("get_project", { projectId: 30 });
+  assert.equal(saved.budget, "10500");
+  assert.equal(saved.days, 15);
+  assert.equal(saved.auth, "extend");
+  assert.equal(saved.desc, "原描述");
+  assert.equal(saved.PM, "owner");
+});
+
+test("团队复制默认只预览，确认复制保留目标成员和角色并按目标天数新增", async () => {
+  const args = { sourceType: "project", sourceId: 10, targetType: "project", targetId: 20 };
+  const beforeWrites = requests.filter((item) => item.method !== "GET").length;
+  const preview = await call("copy_team", args);
+  assert.equal(preview.dryRun, true);
+  assert.equal(preview.written, false);
+  assert.deepEqual(preview.added, ["bob"]);
+  assert.equal(requests.filter((item) => item.method !== "GET").length, beforeWrites);
+  const saved = await call("copy_team", { ...args, dryRun: false });
+  assert.equal(saved.verified, true);
+  assert.equal(saved.team.members.find((item) => item.account === "alice").role, "负责人");
+  assert.equal(saved.team.members.find((item) => item.account === "bob").days, 5);
+  const read = await call("get_project_team", { projectId: 20 });
+  assert.equal(read.count, 2);
+  const afterWrites = requests.filter((item) => item.method !== "GET").length;
+  assert.equal((await call("copy_team", { ...args, dryRun: false })).written, false);
+  assert.equal(requests.filter((item) => item.method !== "GET").length, afterWrites);
+});
+
+test("执行团队查询、原生登录页识别及删除参数拒绝", async () => {
+  teams.set("execution:2159", [member("tester")]);
+  const executionTeam = await call("get_execution_team", { executionId: 2159 });
+  assert.equal(executionTeam.members[0].account, "tester");
+  const login = await client.callTool({ name: "get_project_team", arguments: { projectId: 999 } });
+  assert.equal(login.isError, true);
+  assert.match(login.content[0].text, /不是JSON/);
+  const count = requests.length;
+  const invalid = await client.callTool({ name: "copy_team", arguments: { sourceType: "project", sourceId: 10, targetType: "project", targetId: 20, remove: true } });
+  assert.equal(invalid.isError, true);
+  assert.equal(requests.length, count);
+});
+
+test("PDF附件通过专用MCP表单上传、回读且保留描述、状态和未指派值", async () => {
+  const created = await call("create_task", { executionId: 2159, data: { name: "附件任务", type: "test", desc: "非标编号 1119", estimate: 40 } });
+  const writes = requests.filter((item) => item.method !== "GET").length;
+  const preview = await call("upload_task_attachment", { taskId: created.id, filePath: attachmentPath });
+  assert.equal(preview.uploadable, true);
+  assert.equal(preview.dryRun, true);
+  assert.equal(requests.filter((item) => item.method !== "GET").length, writes);
+  const uploaded = await call("upload_task_attachment", { taskId: created.id, filePath: attachmentPath, dryRun: false });
+  assert.equal(uploaded.verified, true);
+  assert.equal(uploaded.file.objectID, created.id);
+  const saved = await call("get_task", { taskId: created.id });
+  assert.equal(saved.desc, created.desc);
+  assert.equal(saved.status, "wait");
+  assert.equal(saved.assignedTo, "");
+  assert.equal(Object.keys(saved.files).length, 1);
+});
+
+test("附件不修改多人、父子和已结束任务，预检查失败不发送POST", async () => {
+  const created = await call("create_task", { executionId: 2159, data: { name: "受限附件任务", type: "test" } });
+  const record = records.tasks.get(created.id);
+  const writes = requests.filter((item) => item.method !== "GET").length;
+  for (const patch of [{ mode: "multi" }, { mode: "", parent: 1 }, { parent: 0, status: "done" }]) {
+    Object.assign(record, patch);
+    const reply = await client.callTool({ name: "upload_task_attachment", arguments: { taskId: record.id, filePath: attachmentPath, dryRun: false } });
+    assert.equal(reply.isError, true);
+  }
+  assert.equal(requests.filter((item) => item.method !== "GET").length, writes);
 });
 
 test("关闭执行通过MCP分页检查；不满足条件不碰任务，满足后先关done任务并正式关闭执行", async () => {

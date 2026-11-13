@@ -2,6 +2,7 @@ const text = (description) => ({ type: "string", description });
 const integer = (description, minimum = 0) => ({ type: "integer", minimum, description });
 const hours = { type: "number", minimum: 0, description: "预计工时" };
 const date = (description) => ({ type: "string", format: "date", description });
+const optionalDate = (description) => ({ description, anyOf: [date(description), { type: "string", enum: [""] }] });
 const strings = (description) => ({ type: "array", items: { type: "string" }, description });
 const priority = { type: "integer", minimum: 1, maximum: 4, description: "优先级（1最高）" };
 
@@ -18,6 +19,17 @@ const projectFields = {
   budgetUnit: { ...text("预算币种"), enum: ["CNY", "USD"] }, days: integer("可用工作日"),
   desc: text("项目描述"), acl: { ...text("访问控制"), enum: ["open", "private"] },
   whitelist: strings("白名单账号"), auth: { ...text("权限控制"), enum: ["extend", "reset"] },
+  begin: date("计划开始日期，不能为空"), end: date("计划结束日期，不能为空"),
+};
+const executionFields = {
+  name: text("执行名称"), code: text("执行代号"),
+  begin: date("计划开始日期，不能为空"), end: date("计划结束日期，不能为空"),
+  days: integer("可用工作日"), desc: text("执行描述"),
+  lifetime: { ...text("执行周期"), enum: ["short", "long", "ops"] },
+  PO: text("产品负责人账号，空字符串表示不指定"), PM: text("执行负责人账号，空字符串表示不指定"),
+  QD: text("测试负责人账号，空字符串表示不指定"), RD: text("发布负责人账号，空字符串表示不指定"),
+  acl: { ...text("访问控制"), enum: ["open", "private"] }, whitelist: strings("白名单账号"),
+  products: { type: "array", items: integer("产品ID", 1), description: "关联产品ID" },
 };
 const requirementFields = {
   module: integer("模块ID"), source: text("需求来源"), sourceNote: text("来源备注"),
@@ -37,9 +49,10 @@ const bugFields = {
 };
 const taskFields = {
   name: text("任务名称"), type: text("任务类型，如devel、test、design、request、study、discuss、ui、affair、misc"),
-  assignedTo: text("指派给账号"), module: integer("模块ID"), story: integer("关联需求ID"),
+  assignedTo: text("指派给账号；省略或空字符串表示未指派"), module: integer("模块ID"), story: integer("关联需求ID"),
   fromBug: integer("来源Bug ID"), pri: priority, estimate: hours,
-  estStarted: date("预计开始日期，YYYY-MM-DD"), deadline: date("截止日期，YYYY-MM-DD"),
+  estStarted: optionalDate("预计开始日期，YYYY-MM-DD；空字符串表示未设置"),
+  deadline: optionalDate("截止日期，YYYY-MM-DD；空字符串表示未设置"), desc: text("任务描述"),
 };
 
 const definitions = {
@@ -66,6 +79,15 @@ const definitions = {
   update_project: {
     description: "修改项目基本信息；data仅填写需要变更的字段",
     method: "PUT", id: "projectId", endpoint: (id) => `/projects/${id}`, fields: projectFields,
+  },
+  create_execution: {
+    description: "在项目下新建执行；name、code、begin、end、days必填，不伪造空开始日期",
+    method: "POST", id: "projectId", endpoint: (id) => `/projects/${id}/executions`,
+    fields: executionFields, required: ["name", "code", "begin", "end", "days"],
+  },
+  update_execution: {
+    description: "修改执行基本信息、日期及关联产品；不直接修改状态或团队",
+    method: "PUT", id: "executionId", endpoint: (id) => `/executions/${id}`, fields: executionFields,
   },
   create_requirement: {
     description: "新建研发需求；data中的product为产品ID，title、pri、category必填",
@@ -112,9 +134,9 @@ const definitions = {
     },
   },
   create_task: {
-    description: "在执行下新建任务；data中的name、type、assignedTo、estStarted、deadline必填",
+    description: "在执行下新建任务；name、type必填，支持desc；指派和日期可省略或传空，服务端自定义必填校验仍生效",
     method: "POST", id: "executionId", endpoint: (id) => `/executions/${id}/tasks`, fields: taskFields,
-    required: ["name", "type", "assignedTo", "estStarted", "deadline"],
+    required: ["name", "type"],
   },
   update_task: {
     description: "修改任务基本字段；data仅填写需要变更的字段",
@@ -199,6 +221,14 @@ export async function callWriteTool(name, args, request) {
   }
   const id = definition.id ? positiveId(args[definition.id], definition.id) : undefined;
   const body = validateData(args.data, definition.fields, definition.required);
+  if (body.begin && body.end && body.end < body.begin) throw new Error("结束日期不能早于开始日期");
+  if (body.estStarted && body.deadline && body.deadline < body.estStarted) throw new Error("截止日期不能早于预计开始日期");
+  if (name === "create_task") {
+    // 17.0 API检查字段存在，普通任务模型允许空日期；创建循环要求指派人为数组。
+    body.assignedTo = [body.assignedTo ?? ""];
+    body.estStarted ??= "";
+    body.deadline ??= "";
+  }
   if (name === "resolve_bug" && body.resolution === "duplicate") {
     positiveId(body.duplicateBug, "duplicateBug");
     if (body.duplicateBug === id) throw new Error("duplicateBug不能指向当前Bug自身");

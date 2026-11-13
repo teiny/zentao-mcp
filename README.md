@@ -1,6 +1,6 @@
 # 禅道 MCP 服务器
 
-这是一个基于禅道 RESTful API v1 的 MCP (Model Context Protocol) 服务器，通过 zentaosid 进行 Cookie 认证，可以查询、新建和修改产品、项目、需求、Bug、任务，不提供删除功能。
+这是一个基于禅道 RESTful API v1 的 MCP (Model Context Protocol) 服务器，通过 zentaosid 进行 Cookie 认证，可以查询、新建和修改产品、项目、执行、需求、Bug、任务，不提供删除功能。团队维护及任务 PDF 附件使用禅道 17.0 原生表单接口封装为专用 MCP 工具。
 
 ## 功能特性
 
@@ -89,6 +89,8 @@ export ZENTAO_SID=your-zentaosid
 
 六类列表统一支持 `page`（从1开始的正整数，默认1）、`limit`（1至100的整数，默认20）。每次只返回一页，保留原实体数组字段，并返回 `page`、`limit`、`total`、`totalPages`、`count`、`hasNext`、`nextPage`。查询下一页时保留范围参数和limit，将page设为nextPage，直到hasNext为false；不能把第一页当作全部数据。
 
+`get_executions` 额外支持 `status`，默认 `all`，项目范围也包含已关闭执行；可指定 `undone`、`wait`、`doing`、`suspended`、`closed`。`get_execution(executionId)` 返回执行详情、关联产品及团队成员。
+
 API v1产品接口通常一次返回完整集合，MCP在确认集合完整后本地分页；其他接口传递并核对服务端分页。服务端忽略页码、每页数量或只返回无法确认完整性的截断集合时返回错误，不伪造分页。总数以当前账号权限和接口默认查询范围为准。
 
 查询项目任务时，先使用 `get_executions` 分页获取执行ID，再调用 `get_tasks`，不能把项目ID当执行ID。详情工具为 `get_product(productId)`、`get_project(projectId)`、`get_requirement(storyId)`、`get_bug(bugId)` 和 `get_task(taskId)`。
@@ -101,11 +103,23 @@ API v1产品接口通常一次返回完整集合，MCP在确认集合完整后�
 | --- | --- | --- | --- |
 | 产品 | `create_product` | `update_product` | data: name、program、code |
 | 项目 | `create_project` | `update_project` | data: name、code、begin、end、products（非空产品ID数组） |
+| 执行 | `create_execution` | `update_execution` | projectId；data: name、code、begin、end、days |
 | 需求 | `create_requirement` | `update_requirement` | data: product、title、pri、category |
 | Bug | `create_bug` | `update_bug` | productId；data: title、severity、pri、type |
-| 任务 | `create_task` | `update_task` | executionId；data: name、type、assignedTo、estStarted、deadline |
+| 任务 | `create_task` | `update_task` | executionId；data: name、type |
 
 修改工具的顶层ID分别为 `productId`、`projectId`、`storyId`、`bugId`、`taskId`。完整可写字段以工具的 inputSchema 为准。
+
+执行修改使用 `executionId`，不提供直接修改状态的字段。任务新建和修改支持 `desc`；新建可省略 `assignedTo`、`estStarted`、`deadline`，或显式传空字符串。MCP 按 17.0 创建循环要求将新建任务的指派转换为数组（未指派为 `[""]`），不代填负责人或日期；修改指派仍传字符串。服务端自定义必填规则仍会返回错误。项目、执行的开始日期在 17.0 后端为必填，MCP 不伪造占位日期；项目修改现支持 `begin`、`end`。
+
+### 团队与任务附件
+
+- `update_project_settings(projectId, data, dryRun)` 补齐17.0 API v1普通项目修改会忽略的 `budget`、`budgetUnit`、`days`、`auth`。默认只预览，`dryRun=false` 经原生项目编辑表单保存并回读；保留其他字段和关联产品，目前仅支持Scrum项目及无关联计划的普通产品，拒绝任意字段和删除标记。
+
+- `get_project_team(projectId)`、`get_execution_team(executionId)` 读取完整成员的账号、角色、工作日、工时及受限标记。
+- `copy_team` 使用 `sourceType`、`sourceId`、`targetType`、`targetId`，类型为 `project` 或 `execution`。默认 `dryRun=true` 仅预览；显式 `dryRun=false` 才维护并回读。保留目标已有成员及其配置，新增成员复制角色、每日工时和受限标记，工作日取目标可用工作日。原生管理接口按完整名单保存，因此写入前复查名单变化，不提供移除成员模式。
+- `upload_task_attachment(taskId, filePath, dryRun)` 接收本机绝对路径的 PDF 或图片，最大 20MiB（服务端仍可能有更低限制）。默认只检查文件和任务；`dryRun=false` 才上传并回读附件。只支持未开始或进行中的普通单人任务，拒绝多人、父子或已结束任务，避免原生编辑接口改变其业务状态。
+- 原生接口使用 `index.php/module-method-id.json` 和已有 Cookie 权限。17.0 API v1 的 `/files` 只接受图片，PDF 不通过该入口上传。任务附件通过原生编辑表单保留原字段并提交 `files[]`；上传后核对新附件及任务原值。失败或结果不明不自动重试，不暴露任意 HTTP 路由或删除能力。
 
 需求的标题、描述、验收标准使用 `change_requirement`，参数为 `storyId` 和 `data`（title、spec、verify 中至少一项）；该操作走需求变更流程，可能需要重新评审。`update_requirement` 用于模块、来源、优先级等其他字段。
 

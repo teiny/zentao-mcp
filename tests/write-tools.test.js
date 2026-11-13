@@ -37,7 +37,7 @@ for (const [description, name, args] of invalid) {
 }
 
 test("仅暴露明确的新建修改工具，不接受删除或原型属性作为工具", async () => {
-  assert.equal(writeTools.length, 12);
+  assert.equal(writeTools.length, 14);
   for (const tool of writeTools) {
     assert.match(tool.name, /^(create|update|change|resolve)_/);
     assert.equal(tool.inputSchema.additionalProperties, false);
@@ -46,6 +46,32 @@ test("仅暴露明确的新建修改工具，不接受删除或原型属性作�
   assert.equal(isWriteTool("delete_task"), false);
   assert.equal(isWriteTool("toString"), false);
   await assert.rejects(callWriteTool("delete_task", { taskId: 1 }, async () => assert.fail("不能发送请求")));
+});
+
+test("普通任务可未指派且无开始日期，保留描述并正确传给17.0创建循环", async () => {
+  const args = { executionId: 1, data: { name: "开发", type: "devel", desc: "非标编号 1119" } };
+  let sent;
+  await callWriteTool("create_task", args, async (path, method, body) => { sent = { path, method, body }; });
+  assert.deepEqual(sent, { path: "/executions/1/tasks", method: "POST", body: { ...args.data, assignedTo: [""], estStarted: "", deadline: "" } });
+  assert.equal(Object.hasOwn(args.data, "assignedTo"), false);
+});
+
+test("修改任务支持清空指派及开始日期，不携带其他业务字段", async () => {
+  const data = { assignedTo: "", estStarted: "", desc: "新描述" };
+  await callWriteTool("update_task", { taskId: 1, data }, async (path, method, body) => {
+    assert.equal(method, "PUT");
+    assert.deepEqual(body, data);
+  });
+});
+
+test("项目和执行拒绝空开始、非法公历日期及倒置日期，不伪造开始日期", async () => {
+  for (const [name, args] of [
+    ["create_execution", { projectId: 1, data: { name: "迭代", code: "e", begin: "", end: "2026-11-26", days: 5 } }],
+    ["create_project", { data: { name: "项目", code: "p", begin: "", end: "2026-11-26", products: [7] } }],
+    ["update_execution", { executionId: 1, data: { begin: "2026-02-30" } }],
+    ["update_task", { taskId: 1, data: { estStarted: "2026-11-26", deadline: "2026-11-19" } }],
+    ["update_task", { taskId: 1, data: { assignedTo: null } }],
+  ]) await assert.rejects(callWriteTool(name, args, async () => assert.fail("非法参数不能发送请求")));
 });
 
 test("Bug部分修改保留必填原值且不复制删除标记或修改调用者数据", async () => {

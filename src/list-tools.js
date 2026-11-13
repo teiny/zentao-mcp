@@ -43,6 +43,10 @@ export const listTools = Object.entries(definitions).map(([name, definition]) =>
         [definition.scope]: { type: "integer", minimum: 1, description: `${definition.scope}，正整数ID` },
       } : {}),
       ...paginationProperties,
+      ...(name === "get_executions" ? { status: {
+        type: "string", enum: ["all", "undone", "wait", "doing", "suspended", "closed"],
+        default: "all", description: "执行状态，默认all，包含已关闭执行",
+      } } : {}),
     },
     required: definition.scope && !definition.optionalScope ? [definition.scope] : [],
     additionalProperties: false,
@@ -93,7 +97,7 @@ export async function callListTool(name, args = {}, request) {
   if (!isListTool(name)) throw new Error(`未知的列表工具: ${name}`);
   const definition = definitions[name];
   if (!args || typeof args !== "object" || Array.isArray(args) ||
-      Object.keys(args).some((key) => key !== "page" && key !== "limit" && key !== definition.scope)) {
+      Object.keys(args).some((key) => key !== "page" && key !== "limit" && key !== definition.scope && !(name === "get_executions" && key === "status"))) {
     throw new Error("列表参数只能包含page、limit及工具声明的范围ID");
   }
   const page = positiveId(args.page === undefined ? 1 : args.page, "page");
@@ -104,6 +108,11 @@ export async function callListTool(name, args = {}, request) {
     id = positiveId(args[definition.scope], definition.scope);
   }
   const query = new URLSearchParams({ page: String(page), limit: String(limit) });
+  if (name === "get_executions") {
+    const status = args.status === undefined ? "all" : args.status;
+    if (!["all", "undone", "wait", "doing", "suspended", "closed"].includes(status)) throw new Error("不支持的执行状态");
+    query.set("status", status);
+  }
   const result = await request(`${definition.endpoint(id)}?${query}`);
   return paginate(result, definition, page, limit);
 }
