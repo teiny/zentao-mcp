@@ -123,6 +123,8 @@ API v1产品接口通常一次返回完整集合，MCP在确认集合完整后�
 
 需求的标题、描述、验收标准使用 `change_requirement`，参数为 `storyId` 和 `data`（title、spec、verify 中至少一项）；该操作走需求变更流程，可能需要重新评审。`update_requirement` 用于模块、来源、优先级等其他字段。
 
+Bug 新建和修改支持 `data.assignedTo`，传入用户账号字符串；修改时传空字符串表示取消指派。指派不会改变 Bug 的解决状态。
+
 Bug 的部分修改会先读取原记录，保留 API 要求的 title、severity、pri、type 未修改值，不复制删除标记或其他响应字段。写入后应使用对应详情工具读回核实；超时或结果不明时先查询，不盲目重复创建。
 
 示例：修改任务名称。

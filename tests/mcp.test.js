@@ -617,3 +617,18 @@ test("MCP项目关闭在发送请求前拒绝非法日期和越界字段", async
   }
   assert.equal(requests.length, beforeCount);
 });
+
+
+test("Bug指派通过MCP创建、修改、清空并读回，状态和原字段保持不变", async () => {
+  const data = { title: "指派集成用例", severity: 2, pri: 2, type: "codeerror", assignedTo: "developer" };
+  const created = await call("create_bug", { productId: 1, data });
+  assert.equal(created.assignedTo, "developer");
+  for (const assignedTo of ["reviewer", ""]) {
+    await call("update_bug", { bugId: created.id, data: { assignedTo } });
+    assert.deepEqual(requests.at(-1).body, { assignedTo, title: data.title, severity: data.severity, pri: data.pri, type: data.type });
+    const saved = await call("get_bug", { bugId: created.id });
+    assert.equal(saved.assignedTo, assignedTo);
+    assert.equal(saved.status, "active");
+    assert.equal(saved.title, data.title);
+  }
+});

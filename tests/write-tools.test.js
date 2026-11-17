@@ -126,3 +126,32 @@ test("解决Bug支持日期及完整时间，重复Bug使用另一对象ID", asy
     assert.equal(sent.resolvedDate, resolvedDate);
   }
 });
+
+
+test("Bug指派支持新建时传入账号，不改变参数类型", async () => {
+  const data = { title: "指派用例", severity: 2, pri: 2, type: "codeerror", assignedTo: "developer" };
+  await callWriteTool("create_bug", { productId: 1, data }, async (path, method, body) => {
+    assert.equal(path, "/products/1/bugs");
+    assert.equal(method, "POST");
+    assert.deepEqual(body, data);
+    assert.equal(typeof body.assignedTo, "string");
+  });
+});
+
+test("Bug指派支持修改及清空，保留必填原值且不修改状态", async () => {
+  for (const assignedTo of ["developer", ""]) {
+    const data = { assignedTo };
+    const requests = [];
+    await callWriteTool("update_bug", { bugId: 10, data }, async (path, method = "GET", body) => {
+      requests.push({ path, method, body });
+      return { title: "原标题", severity: 2, pri: 3, type: "codeerror", assignedTo: "previous", status: "active" };
+    });
+    assert.equal(requests[0].method, "GET");
+    assert.deepEqual(requests[1], { path: "/bugs/10", method: "PUT", body: { assignedTo, title: "原标题", severity: 2, pri: 3, type: "codeerror" } });
+    assert.deepEqual(data, { assignedTo });
+  }
+  await assert.rejects(callWriteTool("update_bug", { bugId: 10, data: { assignedTo: null } }, async () => assert.fail("不能发送请求")));
+  for (const name of ["create_bug", "update_bug"]) {
+    assert.equal(writeTools.find(tool => tool.name === name).inputSchema.properties.data.properties.assignedTo.type, "string");
+  }
+});

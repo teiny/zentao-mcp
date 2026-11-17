@@ -46,6 +46,7 @@ const bugFields = {
   keywords: text("关键词"), os: text("操作系统"), browser: text("浏览器"), steps: text("重现步骤"),
   task: integer("关联任务ID"), story: integer("关联需求ID"), deadline: date("截止日期，YYYY-MM-DD"),
   openedBuild: strings("影响版本ID字符串，可使用trunk"),
+  assignedTo: text("指派给账号；空字符串表示取消指派"),
 };
 const taskFields = {
   name: text("任务名称"), type: text("任务类型，如devel、test、design、request、study、discuss、ui、affair、misc"),
