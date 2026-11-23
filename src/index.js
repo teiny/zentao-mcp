@@ -25,7 +25,7 @@ async function apiRequest(endpoint, method = "GET", body = null) {
 
 // 仅供专用工具使用的17.0原生JSON表单接口，不向调用者开放任意路由。
 async function nativeRequest(module, action, objectId, body = null) {
-  const allowed = { project: ["team", "manageMembers", "edit", "close"], execution: ["team", "manageMembers", "close"], task: ["edit", "close"] };
+  const allowed = { project: ["team", "manageMembers", "edit", "close"], execution: ["team", "manageMembers", "close"], task: ["edit", "close", "finish"] };
   if (!Object.hasOwn(allowed, module) || !allowed[module].includes(action)) throw new Error("不支持的原生接口");
   positiveId(objectId, "objectId");
   return sendRequest(`/index.php/${module}-${action}-${objectId}.json`, body === null ? "GET" : "POST", body, true);

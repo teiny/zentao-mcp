@@ -51,11 +51,22 @@ before(async () => {
     if (request.headers.cookie !== "zentaosid=test-session") {
       return send(401, { error: "unauthorized" });
     }
-    const nativeRoute = url.pathname.match(/^\/zentao\/index\.php\/(project|execution|task)-(team|manageMembers|edit|close)-(\d+)\.json$/);
+    const nativeRoute = url.pathname.match(/^\/zentao\/index\.php\/(project|execution|task)-(team|manageMembers|edit|close|finish)-(\d+)\.json$/);
     if (nativeRoute) {
       const [, module, action, rawId] = nativeRoute;
       const objectId = Number(rawId);
       if (objectId === 999) { response.writeHead(200, { "Content-Type": "text/html" }); return response.end('<form id="loginForm">login</form>'); }
+      if (module === "task" && action === "finish") {
+        const record = records.tasks.get(objectId);
+        if (!record) return send(404, { error: "not found" });
+        if (request.method === "GET") return send(200, { status: "success", data: JSON.stringify({ task: record }) });
+        assert.equal(body.status, "done");
+        assert.equal(Number(body.currentConsumed) > 0, true);
+        Object.assign(record, { status: "done", left: 0, consumed: Number(body.consumed), assignedTo: body.assignedTo,
+          realStarted: body.realStarted, finishedDate: body.finishedDate, finishedBy: "owner" });
+        record.actions.push({ id: nextId++, objectType: "task", objectID: objectId, action: "finished", comment: body.comment });
+        return send(200, { result: "success" });
+      }
       if (["project", "execution", "task"].includes(module) && action === "close") {
         const record = records[`${module}s`].get(objectId);
         if (!record) return send(404, { error: "not found" });
@@ -631,4 +642,33 @@ test("Bug指派通过MCP创建、修改、清空并读回，状态和原字段�
     assert.equal(saved.status, "active");
     assert.equal(saved.title, data.title);
   }
+});
+
+test("MCP完成任务使用独立原生工作流、累计工时并保留详情和所属执行", async () => {
+  const schema = (await client.listTools()).tools.find(tool => tool.name === "finish_task").inputSchema;
+  assert.equal(schema.additionalProperties, false);
+  records.executions.set(9800, { id: 9800, project: 20, type: "sprint", status: "doing", deleted: false });
+  records.tasks.set(9801, { id: 9801, name: "完成任务", type: "devel", project: 20, execution: 9800, status: "wait",
+    desc: "原始业务需求及截图", consumed: 2, left: 1, estimate: 3, assignedTo: { account: "owner" },
+    parent: 0, mode: "", team: [], children: [], actions: [], deleted: false });
+  const input = { taskId: 9801, currentConsumed: 1.5, realStarted: "2026-11-23 09:00:00", finishedDate: "2026-11-23 10:30:00",
+    comment: "后端 & 管理端\n分支：feature-test\n提交：abc123" };
+  const start = requests.length;
+  assert.equal((await call("finish_task", input)).written, false);
+  assert.equal(requests.slice(start).some(item => item.method === "POST"), false);
+  const result = await call("finish_task", { ...input, dryRun: false });
+  assert.equal(result.verified, true);
+  assert.equal(result.task.status, "done");
+  assert.equal(result.task.consumed, 3.5);
+  assert.equal(result.task.left, 0);
+  assert.equal(result.task.desc, "原始业务需求及截图");
+  assert.equal(result.task.realStarted, input.realStarted);
+  assert.equal(result.task.finishedDate, input.finishedDate);
+  assert.equal(result.action.action, "finished");
+  assert.equal(records.executions.get(9800).status, "doing");
+  const writes = requests.slice(start).filter(item => item.method !== "GET");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].path, "/zentao/index.php/task-finish-9801.json");
+  assert.equal(writes[0].body.comment, "后端 &amp; 管理端<br />分支：feature-test<br />提交：abc123");
+  assert.equal(Object.hasOwn(writes[0].body, "desc"), false);
 });

@@ -15,6 +15,15 @@ function tool(name, description, properties, required = Object.keys(properties))
 }
 export const workflowTools = [
   tool("get_execution", "获取执行详情，包括关联产品和团队成员", { executionId: id }),
+  tool("finish_task", "通过禅道正式流程完成普通单人任务并回读完成记录；明确提供本次工时、实际开始和完成时间，不修改任务描述。默认仅预览，dryRun=false才写入，结果不明不自动重试", {
+    taskId: id,
+    currentConsumed: { type: "number", minimum: 0, description: "实际本次消耗工时（小时），由调用者明确提供" },
+    realStarted: { type: "string", description: "实际开始时间，禅道本地时间 YYYY-MM-DD HH:mm:ss" },
+    finishedDate: { type: "string", description: "实际完成时间，禅道本地时间 YYYY-MM-DD HH:mm:ss" },
+    assignedTo: { type: "string", description: "完成后指派账号；省略时保留当前指派，空字符串表示未指派" },
+    comment: { type: "string", description: "完成说明（纯文本，保留换行）" },
+    dryRun: { type: "boolean", default: true },
+  }, ["taskId", "currentConsumed", "realStarted", "finishedDate"]),
   tool("close_task", "通过禅道正式流程关闭指定任务并回读；不联动所属执行，状态流转条件由服务端校验。默认仅预览，dryRun=false才写入，结果不明不自动重试", {
     taskId: id,
     comment: { type: "string", description: "关闭备注" },
@@ -97,6 +106,73 @@ function memberValues(member, days) {
 const signature = (members) => JSON.stringify([...members].sort((a, b) => a.account.localeCompare(b.account)));
 const account = (value) => typeof value === "string" ? value : value?.account ?? "";
 
+function commentText(value) {
+  const entities = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+  return String(value ?? "").replace(/<br\s*\/?>|<\/(?:p|div)>/gi, "\n").replace(/<[^>]*>/g, "")
+    .replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (entity, code) => {
+      if (code[0] !== "#") return entities[code.toLowerCase()];
+      const number = code[1].toLowerCase() === "x" ? parseInt(code.slice(2), 16) : Number(code.slice(1));
+      return number <= 0x10ffff ? String.fromCodePoint(number) : entity;
+    }).replace(/\s+/g, " ").trim();
+}
+
+async function finishTask(args, request, nativeRequest) {
+  validateData({ currentConsumed: args.currentConsumed }, { currentConsumed: { type: "number", minimum: 0 } });
+  for (const key of ["realStarted", "finishedDate"]) {
+    if (!/^\d{4}-\d{2}-\d{2} ([01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(args[key])) throw new Error(key + "必须为YYYY-MM-DD HH:mm:ss");
+    validateData({ date: args[key].slice(0, 10) }, { date: { type: "string", format: "date" } });
+  }
+  if (args.realStarted > args.finishedDate) throw new Error("实际开始时间不能晚于完成时间");
+  const path = "/tasks/" + args.taskId;
+  const current = await request(path);
+  objectMatches(current, "task", args.taskId);
+  const result = { taskId: args.taskId, name: current.name, previousStatus: current.status,
+    currentConsumed: args.currentConsumed, realStarted: args.realStarted, finishedDate: args.finishedDate,
+    dryRun: args.dryRun !== false, written: false };
+  if (current.status === "done") return { ...result, alreadyDone: true, task: current };
+  if (current.mode || Object.values(current.team ?? {}).length || Number(current.parent) < 0 || Object.values(current.children ?? {}).length) {
+    throw new Error("当前完成工具仅支持普通单人任务，不支持多人或父任务");
+  }
+  const consumed = Number(current.consumed);
+  if (current.consumed == null || !Number.isFinite(consumed) || consumed < 0 || !Number.isFinite(consumed + args.currentConsumed)) throw new Error("任务原消耗工时无效");
+  if (!current.actions || typeof current.actions !== "object") throw new Error("任务缺少操作历史，无法核实完成说明");
+  const fields = ["status", "name", "type", "desc", "project", "execution", "consumed", "left", "assignedTo", "parent", "mode", "estimate"];
+  const value = (task, key) => key === "assignedTo" ? account(task[key])
+    : ["consumed", "left", "estimate"].includes(key) ? String(Number(task[key])) : String(task[key] ?? "");
+  const changed = (task, keys) => keys.some(key => value(task, key) !== value(current, key));
+  const view = await nativeRequest("task", "finish", args.taskId);
+  objectMatches(view?.task, "task", args.taskId);
+  if (changed(view.task, fields)) throw new Error("任务已变化，请重新查询；未继续完成");
+  if (result.dryRun) return result;
+  const latest = await request(path);
+  objectMatches(latest, "task", args.taskId);
+  if (changed(latest, [...fields, "realStarted", "lastEditedDate"])) throw new Error("任务已变化，请重新查询；未继续完成");
+  const previousActions = new Set(Object.values(latest.actions ?? {}).map(action => String(action.id)));
+  const comment = args.comment ?? "";
+  const escaped = comment.replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
+  const assignedTo = args.assignedTo ?? account(current.assignedTo);
+  const form = new URLSearchParams({ status: "done", consumed: String(consumed + args.currentConsumed),
+    currentConsumed: String(args.currentConsumed), realStarted: args.realStarted, finishedDate: args.finishedDate,
+    assignedTo, comment: escaped.replace(/\r\n|\r|\n/g, "<br />") });
+  try {
+    await nativeRequest("task", "finish", args.taskId, form);
+    const saved = await request(path);
+    objectMatches(saved, "task", args.taskId);
+    if (saved.status !== "done" || Number(saved.left) !== 0 || account(saved.assignedTo) !== assignedTo ||
+        Math.abs(Number(saved.consumed) - consumed - args.currentConsumed) > 0.00000001 ||
+        !Number.isFinite(Number(saved.consumed)) || !account(saved.finishedBy) || !saved.finishedDate ||
+        changed(saved, ["name", "type", "desc", "project", "execution", "parent", "estimate"])) {
+      throw new Error("完成后的状态、工时或任务原字段回读不一致");
+    }
+    const actions = Object.values(saved.actions ?? {}).filter(action => !previousActions.has(String(action.id)) &&
+      action.action === "finished" && action.objectType === "task" && Number(action.objectID) === args.taskId &&
+      commentText(action.comment) === comment.replace(/\s+/g, " ").trim());
+    if (actions.length !== 1) throw new Error("未回读到唯一匹配的本次完成说明");
+    return { ...result, written: true, verified: true, action: actions[0], task: saved };
+  } catch (error) {
+    throw new Error("完成结果可能已生效，请只读核实，不要盲目重试：" + error.message);
+  }
+}
 async function closeObject(type, args, request, nativeRequest) {
   const idKey = `${type}Id`;
   const objectId = args[idKey];
@@ -262,6 +338,7 @@ async function uploadAttachment(args, request, nativeRequest) {
 export async function callWorkflowTool(name, args, request, nativeRequest) {
   argumentsFor(name, args);
   if (name === "get_execution") return request(`/executions/${args.executionId}`);
+  if (name === "finish_task") return finishTask(args, request, nativeRequest);
   if (name === "close_task") return closeObject("task", args, request, nativeRequest);
   if (name === "close_execution") return closeObject("execution", args, request, nativeRequest);
   if (name === "close_project") return closeObject("project", args, request, nativeRequest);

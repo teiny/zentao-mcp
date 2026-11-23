@@ -112,6 +112,12 @@ API v1产品接口通常一次返回完整集合，MCP在确认集合完整后�
 
 执行修改使用 `executionId`，不提供直接修改状态的字段。任务新建和修改支持 `desc`；新建可省略 `assignedTo`、`estStarted`、`deadline`，或显式传空字符串。MCP 按 17.0 创建循环要求将新建任务的指派转换为数组（未指派为 `[""]`），不代填负责人或日期；修改指派仍传字符串。服务端自定义必填规则仍会返回错误。项目、执行的开始日期在 17.0 后端为必填，MCP 不伪造占位日期；项目修改现支持 `begin`、`end`。
 
+### 完成任务
+
+finish_task(taskId, currentConsumed, realStarted, finishedDate, assignedTo?, comment?, dryRun?) 通过禅道17.0正式任务完成流程设置 done，清零剩余工时并累计本次消耗；不修改任务描述，不关闭执行。currentConsumed 为明确提供的本次实际工时，realStarted、finishedDate 为禅道本地时间 YYYY-MM-DD HH:mm:ss，不自动猜测工时或开始时间；未提供 assignedTo 时保留当前指派。
+
+默认 dryRun=true 只预览；dryRun=false 才通过 task-finish-{id}.json 提交并回读状态、工时、原详情和本次新增的 finished 操作记录。comment 为自动转义、保留换行的纯文本，可在完成说明中记录实际完成分支和提交。当前支持普通单人任务，不支持多人或父任务；已完成任务不重复计时或补写普通评论。权限、必填字段和状态流转仍由服务端校验；结果不明不自动重试，先用 get_task 只读核实。
+
 ### 团队与任务附件
 
 - `update_project_settings(projectId, data, dryRun)` 补齐17.0 API v1普通项目修改会忽略的 `budget`、`budgetUnit`、`days`、`auth`。默认只预览，`dryRun=false` 经原生项目编辑表单保存并回读；保留其他字段和关联产品，目前仅支持Scrum项目及无关联计划的普通产品，拒绝任意字段和删除标记。
