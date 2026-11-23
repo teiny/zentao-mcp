@@ -15,6 +15,11 @@ function tool(name, description, properties, required = Object.keys(properties))
 }
 export const workflowTools = [
   tool("get_execution", "获取执行详情，包括关联产品和团队成员", { executionId: id }),
+  tool("add_task_comment", "向指定任务追加一条纯文本备注并回读，不修改任务描述或状态；保留换行。默认仅预览，dryRun=false才写入，结果不明不自动重试", {
+    taskId: id,
+    comment: { type: "string", minLength: 1, description: "备注正文（纯文本，保留换行）" },
+    dryRun: { type: "boolean", default: true },
+  }, ["taskId", "comment"]),
   tool("finish_task", "通过禅道正式流程完成普通单人任务并回读完成记录；明确提供本次工时、实际开始和完成时间，不修改任务描述。默认仅预览，dryRun=false才写入，结果不明不自动重试", {
     taskId: id,
     currentConsumed: { type: "number", minimum: 0, description: "实际本次消耗工时（小时），由调用者明确提供" },
@@ -114,6 +119,38 @@ function commentText(value) {
       const number = code[1].toLowerCase() === "x" ? parseInt(code.slice(2), 16) : Number(code.slice(1));
       return number <= 0x10ffff ? String.fromCodePoint(number) : entity;
     }).replace(/\s+/g, " ").trim();
+}
+
+async function addTaskComment(args, request, nativeRequest) {
+  if (!args.comment.trim()) throw new Error("备注内容不能为空");
+  const path = `/tasks/${args.taskId}`;
+  const current = await request(path);
+  objectMatches(current, "task", args.taskId);
+  if (!current.actions || typeof current.actions !== "object") throw new Error("任务响应缺少操作历史，无法核实新增备注");
+  const result = { taskId: args.taskId, name: current.name, comment: args.comment, dryRun: args.dryRun !== false, written: false };
+  if (result.dryRun) return result;
+  const beforeIds = new Set(Object.values(current.actions).map(action => String(action.id)));
+  const escaped = args.comment.replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
+  const html = escaped.replace(/\r\n|\r|\n/g, "<br />");
+  try {
+    const response = await nativeRequest("task", "comment", args.taskId, new URLSearchParams({ comment: html }));
+    const saved = await request(path);
+    objectMatches(saved, "task", args.taskId);
+    const actions = Object.values(saved.actions ?? {}).filter(action => !beforeIds.has(String(action.id)) &&
+      Number.isSafeInteger(Number(action.id)) && Number(action.id) > 0 && action.action === "commented" &&
+      action.objectType === "task" && Number(action.objectID) === args.taskId && commentText(action.comment) === args.comment.replace(/\s+/g, " ").trim());
+    if (actions.length !== 1 || (Number.isSafeInteger(Number(response)) && Number(response) !== Number(actions[0].id))) {
+      throw new Error("未回读到唯一匹配的新增备注");
+    }
+    for (const key of ["name", "type", "desc", "status", "assignedTo", "pri", "estimate", "left", "consumed", "project", "execution", "story", "module", "parent", "estStarted", "deadline"]) {
+      const before = key === "assignedTo" ? account(current[key]) : current[key];
+      const after = key === "assignedTo" ? account(saved[key]) : saved[key];
+      if (String(before ?? "") !== String(after ?? "")) throw new Error(`任务${key}在追加备注期间发生变化`);
+    }
+    return { ...result, written: true, verified: true, action: actions[0] };
+  } catch (error) {
+    throw new Error(`备注追加结果未确认：${error.message}；请只读核实，不要盲目重试`);
+  }
 }
 
 async function finishTask(args, request, nativeRequest) {
@@ -338,6 +375,7 @@ async function uploadAttachment(args, request, nativeRequest) {
 export async function callWorkflowTool(name, args, request, nativeRequest) {
   argumentsFor(name, args);
   if (name === "get_execution") return request(`/executions/${args.executionId}`);
+  if (name === "add_task_comment") return addTaskComment(args, request, nativeRequest);
   if (name === "finish_task") return finishTask(args, request, nativeRequest);
   if (name === "close_task") return closeObject("task", args, request, nativeRequest);
   if (name === "close_execution") return closeObject("execution", args, request, nativeRequest);

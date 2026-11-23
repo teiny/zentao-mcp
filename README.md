@@ -117,6 +117,9 @@ API v1产品接口通常一次返回完整集合，MCP在确认集合完整后�
 finish_task(taskId, currentConsumed, realStarted, finishedDate, assignedTo?, comment?, dryRun?) 通过禅道17.0正式任务完成流程设置 done，清零剩余工时并累计本次消耗；不修改任务描述，不关闭执行。currentConsumed 为明确提供的本次实际工时，realStarted、finishedDate 为禅道本地时间 YYYY-MM-DD HH:mm:ss，不自动猜测工时或开始时间；未提供 assignedTo 时保留当前指派。
 
 默认 dryRun=true 只预览；dryRun=false 才通过 task-finish-{id}.json 提交并回读状态、工时、原详情和本次新增的 finished 操作记录。comment 为自动转义、保留换行的纯文本，可在完成说明中记录实际完成分支和提交。当前支持普通单人任务，不支持多人或父任务；已完成任务不重复计时或补写普通评论。权限、必填字段和状态流转仍由服务端校验；结果不明不自动重试，先用 get_task 只读核实。
+### 追加任务备注
+
+`add_task_comment(taskId, comment, dryRun)` 向指定任务追加一条操作历史备注，不覆盖任务描述或修改任务状态。`comment` 为非空纯文本，自动转义 HTML 并保留换行；默认 `dryRun=true` 只预览，已获授权时传 `dryRun=false` 才写入。通过禅道17.0原生 `action-comment-task-{id}.json` 提交后，回读新备注的操作ID、对象及正文，并核对任务业务字段。结果不明或回读不一致时不自动重试，应先用 `get_task` 只读核实，避免重复追加。
 
 ### 团队与任务附件
 

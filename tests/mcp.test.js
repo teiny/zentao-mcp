@@ -51,6 +51,17 @@ before(async () => {
     if (request.headers.cookie !== "zentaosid=test-session") {
       return send(401, { error: "unauthorized" });
     }
+    const commentRoute = url.pathname.match(/^\/zentao\/index\.php\/action-comment-task-(\d+)\.json$/);
+    if (commentRoute && request.method === "POST") {
+      const taskId = Number(commentRoute[1]);
+      const record = records.tasks.get(taskId);
+      if (!record) return send(404, { error: "not found" });
+      if (record.commentDenied) return send(403, { error: "无备注权限" });
+      assert.deepEqual(Object.keys(body), ["comment"]);
+      const actionId = nextId++;
+      if (!record.commentNoSave) record.actions.push({ id: actionId, objectType: "task", objectID: taskId, action: "commented", comment: body.comment });
+      return send(200, { status: "success", data: JSON.stringify(actionId) });
+    }
     const nativeRoute = url.pathname.match(/^\/zentao\/index\.php\/(project|execution|task)-(team|manageMembers|edit|close|finish)-(\d+)\.json$/);
     if (nativeRoute) {
       const [, module, action, rawId] = nativeRoute;
@@ -641,6 +652,38 @@ test("Bug指派通过MCP创建、修改、清空并读回，状态和原字段�
     assert.equal(saved.assignedTo, assignedTo);
     assert.equal(saved.status, "active");
     assert.equal(saved.title, data.title);
+  }
+});
+
+
+test("任务备注工具经stdio发现、预览和固定原生路由追加，不修改描述及状态", async () => {
+  const schema = (await client.listTools()).tools.find(tool => tool.name === "add_task_comment").inputSchema;
+  assert.deepEqual(schema.required, ["taskId", "comment"]);
+  const record = { id: 9700, name: "备注集成任务", type: "devel", status: "wait", desc: "原需求描述", assignedTo: "owner", deleted: false, actions: [] };
+  records.tasks.set(record.id, record);
+  const start = requests.length;
+  assert.equal((await call("add_task_comment", { taskId: record.id, comment: "需求确认\n仅追加备注" })).written, false);
+  assert.equal(requests.slice(start).some(item => item.method !== "GET"), false);
+  const saved = await call("add_task_comment", { taskId: record.id, comment: "需求确认\n仅追加备注", dryRun: false });
+  assert.equal(saved.verified, true);
+  assert.equal(saved.action.comment, "需求确认<br />仅追加备注");
+  const writes = requests.slice(start).filter(item => item.method !== "GET");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].path, "/zentao/index.php/action-comment-task-9700.json");
+  assert.deepEqual(writes[0].body, { comment: "需求确认<br />仅追加备注" });
+  assert.equal(record.desc, "原需求描述");
+  assert.equal(record.status, "wait");
+  assert.equal(record.assignedTo, "owner");
+});
+
+test("备注无权限或回读未落库经stdio返回失败且不重复POST", async () => {
+  for (const [taskId, flag] of [[9701, "commentDenied"], [9702, "commentNoSave"]]) {
+    records.tasks.set(taskId, { id: taskId, name: "备注失败任务", status: "wait", desc: "原描述", deleted: false, actions: [], [flag]: true });
+    const start = requests.length;
+    const reply = await client.callTool({ name: "add_task_comment", arguments: { taskId, comment: "确认说明", dryRun: false } });
+    assert.equal(reply.isError, true);
+    assert.match(reply.content[0].text, /不要盲目重试/);
+    assert.equal(requests.slice(start).filter(item => item.method === "POST").length, 1);
   }
 });
 
