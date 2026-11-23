@@ -51,6 +51,25 @@ before(async () => {
     if (request.headers.cookie !== "zentaosid=test-session") {
       return send(401, { error: "unauthorized" });
     }
+    const subtaskRoute = url.pathname.match(/^\/zentao\/index\.php\/task-batchCreate-(\d+)-0-0-(\d+)\.json$/);
+    if (subtaskRoute && request.method === "POST") {
+      const executionId = Number(subtaskRoute[1]);
+      const parentId = Number(subtaskRoute[2]);
+      const parent = records.tasks.get(parentId);
+      if (!parent || Number(parent.execution) !== executionId) return send(404, { error: "parent not found" });
+      if (parent.subtaskDenied) return send(403, { error: "无拆分权限" });
+      assert.equal(body["parent[1]"], String(parentId));
+      assert.equal(Object.hasOwn(body, "status"), false);
+      if (!parent.subtaskNoSave) {
+        const child = { id: nextId++, execution: executionId, project: parent.project, parent: parentId, status: "wait", deleted: false };
+        for (const [key, value] of Object.entries(body)) if (key.endsWith("[1]") && !["parent[1]", "color[1]", "vision[1]"].includes(key)) child[key.slice(0, -3)] = value;
+        child.desc = child.desc.replace(/\n/g, "<br />\n");
+        records.tasks.set(child.id, child);
+        parent.children.push(child);
+        parent.parent = -1;
+      }
+      return send(200, { result: "success" });
+    }
     const commentRoute = url.pathname.match(/^\/zentao\/index\.php\/action-comment-task-(\d+)\.json$/);
     if (commentRoute && request.method === "POST") {
       const taskId = Number(commentRoute[1]);
@@ -714,4 +733,43 @@ test("MCP完成任务使用独立原生工作流、累计工时并保留详情�
   assert.equal(writes[0].path, "/zentao/index.php/task-finish-9801.json");
   assert.equal(writes[0].body.comment, "后端 &amp; 管理端<br />分支：feature-test<br />提交：abc123");
   assert.equal(Object.hasOwn(writes[0].body, "desc"), false);
+});
+
+test("子任务经stdio发现、预览、正式拆分及回读，重复调用不新增", async () => {
+  const schema = (await client.listTools()).tools.find(tool => tool.name === "create_subtask").inputSchema;
+  assert.deepEqual(schema.required, ["parentTaskId", "data"]);
+  const parent = { id: 9900, name: "父需求", type: "devel", execution: 9, project: 20, parent: 0, mode: "", team: [],
+    children: [{ id: 9899, name: "已有开发", parent: 9900 }], pri: 3, module: 0, story: 0, desc: "原业务", deleted: false, status: "wait" };
+  records.tasks.set(parent.id, parent);
+  const input = { parentTaskId: parent.id, data: { name: "需求测试", type: "test", assignedTo: "tester", desc: "功能验收\n回归" } };
+  const start = requests.length;
+  assert.equal((await call("create_subtask", input)).written, false);
+  assert.equal(requests.slice(start).some(item => item.method === "POST"), false);
+  const result = await call("create_subtask", { ...input, dryRun: false });
+  assert.equal(result.verified, true);
+  assert.equal(result.task.parent, parent.id);
+  assert.equal(result.task.execution, 9);
+  assert.equal(result.task.assignedTo, "tester");
+  assert.equal(parent.parent, -1);
+  assert.equal(parent.children[0].id, 9899);
+  const writes = requests.slice(start).filter(item => item.method === "POST");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].path, "/zentao/index.php/task-batchCreate-9-0-0-9900.json");
+  assert.equal(writes[0].body["parent[1]"], "9900");
+  assert.equal((await call("create_subtask", { ...input, dryRun: false })).alreadyExists, true);
+  assert.equal(requests.slice(start).filter(item => item.method === "POST").length, 1);
+});
+
+test("子任务权限拒绝和落库不明经stdio报错，不自动重试", async () => {
+  for (const [parentTaskId, flag] of [[9901, "subtaskDenied"], [9902, "subtaskNoSave"]]) {
+    records.tasks.set(parentTaskId, { id: parentTaskId, name: "父需求", type: "devel", execution: 9, parent: 0,
+      children: [], mode: "", team: [], pri: 3, desc: "原业务", deleted: false, [flag]: true });
+    const start = requests.length;
+    const reply = await client.callTool({ name: "create_subtask", arguments: {
+      parentTaskId, data: { name: "测试", type: "test", assignedTo: "tester" }, dryRun: false,
+    } });
+    assert.equal(reply.isError, true);
+    assert.match(reply.content[0].text, /不要盲目重试/);
+    assert.equal(requests.slice(start).filter(item => item.method === "POST").length, 1);
+  }
 });

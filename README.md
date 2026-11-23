@@ -121,6 +121,22 @@ finish_task(taskId, currentConsumed, realStarted, finishedDate, assignedTo?, com
 
 `add_task_comment(taskId, comment, dryRun)` 向指定任务追加一条操作历史备注，不覆盖任务描述或修改任务状态。`comment` 为非空纯文本，自动转义 HTML 并保留换行；默认 `dryRun=true` 只预览，已获授权时传 `dryRun=false` 才写入。通过禅道17.0原生 `action-comment-task-{id}.json` 提交后，回读新备注的操作ID、对象及正文，并核对任务业务字段。结果不明或回读不一致时不自动重试，应先用 `get_task` 只读核实，避免重复追加。
 
+### create_subtask
+
+通过禅道17.0正式拆分流程创建真实子任务，不能用普通create_task中的额外字段代替。父任务由parentTaskId指定，data支持name、type、assignedTo、module、story、pri、estimate、estStarted、deadline、desc，name/type必填；指派填写账号。
+
+默认只预览，显式dryRun=false才写入。未提供时沿用父任务模块、需求、优先级和已排日期，预计工时为0（未估算），不代填非零工时。禁止为17.0多人任务或子任务继续拆分；同名同字段已存在时只回读，不重复创建。权限/超时/回读不明时不自动重发，调用方须先只读核查。
+
+新建后验证父子关系、所属执行、类型、指派及字段。父任务的状态、工时和日期由禅道正式流程汇总；如果原父任务已有消耗工时，禅道可自动新增一个继承原开发记录的子任务，工具将其作为additionalChildren返回，不删除或覆盖原子任务。
+
+示例：
+
+```json
+{"parentTaskId":123,"data":{"name":"功能验收测试","type":"test","assignedTo":"tester","desc":"按父任务需求验证功能及相关回归"},"dryRun":false}
+```
+
+该能力只负责创建和验证，不自动完成、关闭或替测试组给出验收结论。
+
 ### 团队与任务附件
 
 - `update_project_settings(projectId, data, dryRun)` 补齐17.0 API v1普通项目修改会忽略的 `budget`、`budgetUnit`、`days`、`auth`。默认只预览，`dryRun=false` 经原生项目编辑表单保存并回读；保留其他字段和关联产品，目前仅支持Scrum项目及无关联计划的普通产品，拒绝任意字段和删除标记。
@@ -241,4 +257,3 @@ MCP负责认证、参数校验、服务端协议适配和结果核实。业务�
 ## 许可证
 
 MIT
-

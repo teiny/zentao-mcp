@@ -48,7 +48,7 @@ const bugFields = {
   openedBuild: strings("影响版本ID字符串，可使用trunk"),
   assignedTo: text("指派给账号；空字符串表示取消指派"),
 };
-const taskFields = {
+export const taskFields = {
   name: text("任务名称"), type: text("任务类型，如devel、test、design、request、study、discuss、ui、affair、misc"),
   assignedTo: text("指派给账号；省略或空字符串表示未指派"), module: integer("模块ID"), story: integer("关联需求ID"),
   fromBug: integer("来源Bug ID"), pri: priority, estimate: hours,

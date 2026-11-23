@@ -9,6 +9,7 @@ import {
 import { callWriteTool, isWriteTool, positiveId, writeTools } from "./write-tools.js";
 import { callListTool, isListTool, listTools } from "./list-tools.js";
 import { callWorkflowTool, isWorkflowTool, workflowTools } from "./workflow-tools.js";
+import { createSubtask, subtaskTools } from "./subtask-tools.js";
 
 // 配置存储
 let config = {
@@ -24,13 +25,16 @@ async function apiRequest(endpoint, method = "GET", body = null) {
 }
 
 // 仅供专用工具使用的17.0原生JSON表单接口，不向调用者开放任意路由。
-async function nativeRequest(module, action, objectId, body = null) {
-  const allowed = { project: ["team", "manageMembers", "edit", "close"], execution: ["team", "manageMembers", "close"], task: ["edit", "close", "comment", "finish"] };
+async function nativeRequest(module, action, objectId, body = null, parentTaskId = null) {
+  const allowed = { project: ["team", "manageMembers", "edit", "close"], execution: ["team", "manageMembers", "close"], task: ["edit", "close", "comment", "finish", "batchCreate"] };
   if (!Object.hasOwn(allowed, module) || !allowed[module].includes(action)) throw new Error("不支持的原生接口");
   positiveId(objectId, "objectId");
-  const path = module === "task" && action === "comment"
-    ? `/index.php/action-comment-task-${objectId}.json`
-    : `/index.php/${module}-${action}-${objectId}.json`;
+  if (parentTaskId !== null && !(module === "task" && action === "batchCreate")) throw new Error("不支持的父任务参数");
+  const path = module === "task" && action === "batchCreate"
+    ? `/index.php/task-batchCreate-${objectId}-0-0-${positiveId(parentTaskId, "parentTaskId")}.json`
+    : module === "task" && action === "comment"
+      ? `/index.php/action-comment-task-${objectId}.json`
+      : `/index.php/${module}-${action}-${objectId}.json`;
   return sendRequest(path, body === null ? "GET" : "POST", body, true);
 }
 
@@ -200,6 +204,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       ...writeTools,
       ...workflowTools,
+      ...subtaskTools,
     ],
   };
 });
@@ -209,6 +214,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
+    if (name === "create_subtask") {
+      const result = await createSubtask(args, apiRequest, nativeRequest);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
     if (isWorkflowTool(name)) {
       const result = await callWorkflowTool(name, args, apiRequest, nativeRequest);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
