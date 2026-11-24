@@ -140,8 +140,10 @@ const definitions = {
     required: ["name", "type"],
   },
   update_task: {
-    description: "修改任务基本字段；data仅填写需要变更的字段",
-    method: "PUT", id: "taskId", endpoint: (id) => `/tasks/${id}`, fields: taskFields,
+    description: "通过正式编辑流程修改普通单人任务并保留其他字段、日期及完成者；支持明确更正实际开始时间和完成者，不流转状态",
+    method: "PUT", id: "taskId", endpoint: (id) => `/tasks/${id}`,
+    fields: { ...taskFields, realStarted: { ...text("更正实际开始时间，禅道本地时间YYYY-MM-DD HH:mm:ss"), pattern: "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$" }, finishedBy: text("更正完成者账号，不改变状态或工时") },
+    preserveTaskDates: true,
   },
 };
 
@@ -214,7 +216,50 @@ export function isWriteTool(name) {
   return Object.hasOwn(definitions, name);
 }
 
-export async function callWriteTool(name, args, request) {
+function taskDate(value, name, allowEmpty = false) {
+  if (allowEmpty && (value === null || value === "" || value === "0000-00-00 00:00:00")) return value ?? "";
+  const iso = typeof value === "string" ? value.replace(" ", "T") : "";
+  const parsed = Date.parse(iso + "Z");
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ||
+      !Number.isFinite(parsed) || new Date(parsed).toISOString().slice(0, 19) !== iso) {
+    throw new Error(`${name}必须为有效禅道本地时间YYYY-MM-DD HH:mm:ss`);
+  }
+  return value;
+}
+
+async function updateTask(id, body, request, nativeRequest) {
+  if (Object.hasOwn(body, "realStarted")) taskDate(body.realStarted, "realStarted");
+  if (Object.hasOwn(body, "finishedBy") && !body.finishedBy.trim()) throw new Error("finishedBy必须为非空账号");
+  const current = (await nativeRequest("task", "edit", id))?.task;
+  if (Number(current?.id) !== id || current.deleted === true || current.deleted === "1") throw new Error("任务不存在、已删除或对象ID不匹配");
+  if (current.mode || Number(current.parent) !== 0) throw new Error("任务编辑目前仅支持普通单人任务，不修改多人或父子任务");
+  const fields = ["name", "type", "desc", "assignedTo", "pri", "estimate", "left", "consumed", "story", "parent", "execution", "module", "status", "estStarted", "deadline", "realStarted", "finishedDate", "finishedBy"];
+  const form = new URLSearchParams();
+  for (const key of fields) {
+    if (!Object.hasOwn(current, key)) throw new Error(`任务原值缺少${key}，无法安全保留字段`);
+    let value = Object.hasOwn(body, key) ? body[key] : current[key];
+    if (["realStarted", "finishedDate"].includes(key)) value = taskDate(value, key, true);
+    if (["assignedTo", "finishedBy"].includes(key) && value && typeof value === "object") value = value.account;
+    form.set(key, String(value ?? ""));
+  }
+  for (const key of ["canceledBy", "canceledDate", "closedBy", "closedDate", "closedReason"]) {
+    if (!Object.hasOwn(current, key)) continue;
+    let value = current[key];
+    if (key.endsWith("Date")) value = taskDate(value, key, true);
+    if (key.endsWith("By") && value && typeof value === "object") value = value.account;
+    form.set(key, String(value ?? ""));
+  }
+  if (Object.hasOwn(body, "fromBug") || Object.hasOwn(current, "fromBug")) form.set("fromBug", String(body.fromBug ?? current.fromBug));
+  const recipients = Array.isArray(current.mailto) ? current.mailto : String(current.mailto ?? "").split(",").filter(Boolean);
+  for (const recipient of recipients) form.append("mailto[]", typeof recipient === "object" ? recipient.account : recipient);
+  form.set("comment", "");
+  form.set("uid", "");
+  // 17.0任务API不能可靠保留/更正实际开始时间，使用正式编辑表单并携带原字段。
+  await nativeRequest("task", "edit", id, form);
+  return request(`/tasks/${id}`);
+}
+
+export async function callWriteTool(name, args, request, nativeRequest) {
   if (!isWriteTool(name)) throw new Error(`未知的写入工具: ${name}`);
   const definition = definitions[name];
   if (!args || Object.keys(args).some((key) => key !== "data" && key !== definition.id)) {
@@ -224,6 +269,7 @@ export async function callWriteTool(name, args, request) {
   const body = validateData(args.data, definition.fields, definition.required);
   if (body.begin && body.end && body.end < body.begin) throw new Error("结束日期不能早于开始日期");
   if (body.estStarted && body.deadline && body.deadline < body.estStarted) throw new Error("截止日期不能早于预计开始日期");
+  if (definition.preserveTaskDates) return updateTask(id, body, request, nativeRequest);
   if (name === "create_task") {
     // 17.0 API检查字段存在，普通任务模型允许空日期；创建循环要求指派人为数组。
     body.assignedTo = [body.assignedTo ?? ""];

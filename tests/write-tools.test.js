@@ -56,12 +56,23 @@ test("普通任务可未指派且无开始日期，保留描述并正确传给17
   assert.equal(Object.hasOwn(args.data, "assignedTo"), false);
 });
 
-test("修改任务支持清空指派及开始日期，不携带其他业务字段", async () => {
+test("修改任务支持清空指派及预计开始日期，并保留实际日期", async () => {
   const data = { assignedTo: "", estStarted: "", desc: "新描述" };
-  await callWriteTool("update_task", { taskId: 1, data }, async (path, method, body) => {
-    assert.equal(method, "PUT");
-    assert.deepEqual(body, data);
+  const current = { id: 1, name: "原任务", type: "devel", desc: "原描述", assignedTo: "owner",
+    pri: 3, estimate: 8, left: 8, consumed: 0, story: 0, parent: 0, execution: 4, module: 0,
+    status: "doing", estStarted: "2026-11-13", deadline: "", realStarted: "2026-11-13 15:37:49", finishedDate: "0000-00-00 00:00:00", finishedBy: "" };
+  let posted;
+  await callWriteTool("update_task", { taskId: 1, data }, async (path, method = "GET") => {
+    assert.equal(method, "GET");
+    assert.equal(path, "/tasks/1");
+  }, async (module, action, id, form) => {
+    if (!form) return { task: current };
+    posted = Object.fromEntries(form);
   });
+  assert.equal(posted.assignedTo, "");
+  assert.equal(posted.estStarted, "");
+  assert.equal(posted.desc, data.desc);
+  for (const key of ["realStarted", "finishedDate", "status", "estimate", "left", "consumed"]) assert.equal(posted[key], String(current[key]));
 });
 
 test("项目和执行拒绝空开始、非法公历日期及倒置日期，不伪造开始日期", async () => {

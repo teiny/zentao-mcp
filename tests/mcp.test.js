@@ -141,6 +141,14 @@ before(async () => {
         if (!record) return send(404, { error: "not found" });
         if (request.method === "GET") return send(200, { status: "success", data: JSON.stringify({ task: record }) });
         const file = body["files[]"];
+        if (!file) {
+          for (const key of ["realStarted", "finishedDate", "status", "estimate", "left", "consumed"]) assert.equal(Object.hasOwn(body, key), true);
+          if (body.status === "done" && !body.finishedBy) record.finishedBy = "editor";
+          for (const [key, value] of Object.entries(body)) {
+            if (Object.hasOwn(record, key)) record[key] = typeof record[key] === "number" ? Number(value) : value;
+          }
+          return send(200, { result: "success" });
+        }
         assert.equal(file.name, "立项单.pdf");
         assert.equal(await file.text(), "%PDF-1.4\nmock attachment\n");
         for (const key of ["name", "type", "desc", "status", "assignedTo", "estimate", "left", "consumed", "realStarted"]) assert.equal(String(body[key]), String(record[key]));
@@ -189,7 +197,7 @@ before(async () => {
     if (request.method === "POST" && collection) {
       const record = { id: nextId++, ...(collection === "bugs" ? { status: "active" } : {}), ...parent, ...body };
       if (collection === "projects") record.type = "project";
-      if (collection === "tasks") Object.assign(record, { status: "wait", desc: "", mode: "", team: [], parent: 0, pri: 3, estimate: 0, left: 0, consumed: 0, story: 0, module: 0, realStarted: "0000-00-00 00:00:00", files: {}, ...body, assignedTo: body.assignedTo[0] });
+      if (collection === "tasks") Object.assign(record, { status: "wait", desc: "", mode: "", team: [], parent: 0, pri: 3, estimate: 0, left: 0, consumed: 0, story: 0, module: 0, realStarted: "0000-00-00 00:00:00", finishedDate: "0000-00-00 00:00:00", finishedBy: "", files: {}, ...body, assignedTo: body.assignedTo[0] });
       records[collection].set(record.id, record);
       return send(201, record);
     }
@@ -217,6 +225,8 @@ before(async () => {
           return send(400, { error: "Bug 修改缺少必填字段" });
         }
         Object.assign(record, body);
+        // 17.0实际任务API不能可靠保存实际开始时间；正式编辑表单支持该字段。
+        if (single[1] === "tasks") record.realStarted = "0000-00-00 00:00:00";
         return send(200, record);
       }
     }
@@ -364,12 +374,17 @@ for (const [tool, collection, idKey, data, patch] of examples) {
     const read = await call(`get_${tool}`, { [idKey]: created.id });
     assert.equal(read.id, created.id);
     await call(`update_${tool}`, { [idKey]: created.id, data: patch });
-    const updateRequest = requests.at(-1);
-    assert.equal(updateRequest.method, "PUT");
-    assert.equal(updateRequest.path, `/${collection}/${created.id}`);
+    const updateRequest = tool === "task" ? requests.filter(item => item.method === "POST").at(-1) : requests.at(-1);
+    assert.equal(updateRequest.method, tool === "task" ? "POST" : "PUT");
+    assert.equal(updateRequest.path, tool === "task" ? `/zentao/index.php/task-edit-${created.id}.json` : `/${collection}/${created.id}`);
     if (tool === "bug") {
       assert.equal(updateRequest.body.title, data.title);
       assert.equal(updateRequest.body.severity, data.severity);
+    } else if (tool === "task") {
+      assert.equal(updateRequest.body.name, patch.name);
+      assert.equal(updateRequest.body.realStarted, read.realStarted);
+      assert.equal(updateRequest.body.finishedDate, read.finishedDate);
+      assert.equal(updateRequest.body.status, read.status);
     } else {
       assert.deepEqual(updateRequest.body, patch);
     }
@@ -469,6 +484,29 @@ test("任务描述、空开始日期与未指派通过MCP保存及回读", async
   assert.equal(saved.desc, "非标编号 1119\n需求内容");
   assert.equal(saved.assignedTo, "");
   assert.equal(saved.estStarted, "");
+});
+
+test("任务日期保留与实际开始时间恢复通过stdio MCP完整链路", async () => {
+  for (const [id, status, realStarted, finishedDate] of [
+    [91, "wait", "0000-00-00 00:00:00", "0000-00-00 00:00:00"],
+    [92, "doing", "2026-11-13 15:37:49", "0000-00-00 00:00:00"],
+    [93, "done", "2026-11-19 08:30:00", "2026-11-20 11:12:52"]
+  ]) {
+    const before = { id, status, realStarted, finishedDate, finishedBy: status === "done" ? "original-finisher" : "", name: "日期保留任务",
+      type: "devel", mode: "", parent: 0, module: 0, story: 0, pri: 3, estStarted: "", deadline: "", execution: 777, desc: "原描述", assignedTo: "owner", estimate: 32, consumed: 8, left: status === "done" ? 0 : 24 };
+    records.tasks.set(id, structuredClone(before));
+    await call("update_task", { taskId: id, data: { desc: "<h3>本期需求</h3>" } });
+    assert.deepEqual(await call("get_task", { taskId: id }), { ...before, desc: "<h3>本期需求</h3>" });
+  }
+  records.tasks.get(92).realStarted = "0000-00-00 00:00:00";
+  const before = structuredClone(records.tasks.get(92));
+  const restored = "2026-11-13 15:37:49";
+  await call("update_task", { taskId: 92, data: { realStarted: restored } });
+  assert.deepEqual(await call("get_task", { taskId: 92 }), { ...before, realStarted: restored });
+  records.tasks.get(93).finishedBy = "editor";
+  const doneBefore = structuredClone(records.tasks.get(93));
+  await call("update_task", { taskId: 93, data: { finishedBy: "original-finisher" } });
+  assert.deepEqual(await call("get_task", { taskId: 93 }), { ...doneBefore, finishedBy: "original-finisher" });
 });
 
 test("项目预算工作日和继承权限通过专用MCP维护并保留产品及其他字段", async () => {

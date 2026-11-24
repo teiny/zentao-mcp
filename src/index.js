@@ -227,7 +227,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
     if (isWriteTool(name)) {
-      const result = await callWriteTool(name, args, apiRequest);
+      const result = await callWriteTool(name, args, apiRequest, nativeRequest);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
     switch (name) {
