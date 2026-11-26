@@ -27,7 +27,8 @@ function backend(options = {}) {
     if (!options.noSave) {
       const child = { id: 60, execution: 7, parent: options.wrongParent ? 99 : 42, status: "wait", deleted: false };
       for (const [key, value] of form) if (key.endsWith("[1]") && !["parent[1]", "color[1]", "vision[1]"].includes(key)) child[key.slice(0, -3)] = value;
-      child.desc = child.desc.replace(/\n/g, "<br />\n");
+      child.desc = child.desc.replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[character])
+        .replace(/\r\n|\r|\n/g, "<br />\n");
       if (options.wrongUser) child.assignedTo = "other";
       children.set(child.id, child);
       parent.children.push(child);
@@ -78,6 +79,28 @@ test("正式拆分回读父子关系、指派和描述，保留既有开发子�
   assert.equal(b.writes[0].get("name[1]"), input.data.name);
   assert.equal(b.writes[0].has("status"), false);
   assert.equal(b.parent.children[0].id, 38);
+});
+
+test("纯文本的特殊字符和段落经服务端转义后可正确回读及查重", async () => {
+  const b = backend();
+  const data = { ...input.data, desc: 'A & B < 3 > 1，"引号"与\'单引号\'\n\nMap<String> 与字面量 &lt;p&gt;' };
+  const result = await createSubtask({ ...input, data }, b.request, b.native);
+  assert.equal(result.verified, true);
+  assert.equal(b.writes[0].get("desc[1]"), data.desc, "不要在MCP中再次转义输入");
+  assert.match(result.task.desc, /A &amp; B &lt; 3 &gt; 1/);
+  assert.equal((await createSubtask({ ...input, data }, b.request, b.native)).alreadyExists, true);
+  assert.equal(b.writes.length, 1);
+});
+
+test("HTML排版描述在预览及写入前拒绝，避免先创建再报回读不一致", async () => {
+  for (const desc of ["<p>第一段</p>\n<p>第二段</p>", "<h3>目标</h3><ul><li>验收</li></ul>", "第一行<br />第二行"]) {
+    for (const dryRun of [true, false]) {
+      const b = backend();
+      await assert.rejects(createSubtask({ ...input, data: { ...input.data, desc }, dryRun }, b.request, b.native), /纯文本/);
+      assert.equal(b.reads, 0);
+      assert.equal(b.writes.length, 0);
+    }
+  }
 });
 
 test("完成父任务可保留服务端生成的原工时继承子任务", async () => {

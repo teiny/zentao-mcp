@@ -63,7 +63,8 @@ before(async () => {
       if (!parent.subtaskNoSave) {
         const child = { id: nextId++, execution: executionId, project: parent.project, parent: parentId, status: "wait", deleted: false };
         for (const [key, value] of Object.entries(body)) if (key.endsWith("[1]") && !["parent[1]", "color[1]", "vision[1]"].includes(key)) child[key.slice(0, -3)] = value;
-        child.desc = child.desc.replace(/\n/g, "<br />\n");
+        child.desc = child.desc.replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[character])
+          .replace(/\r\n|\r|\n/g, "<br />\n");
         records.tasks.set(child.id, child);
         parent.children.push(child);
         parent.parent = -1;
@@ -779,7 +780,7 @@ test("子任务经stdio发现、预览、正式拆分及回读，重复调用不
   const parent = { id: 9900, name: "父需求", type: "devel", execution: 9, project: 20, parent: 0, mode: "", team: [],
     children: [{ id: 9899, name: "已有开发", parent: 9900 }], pri: 3, module: 0, story: 0, desc: "原业务", deleted: false, status: "wait" };
   records.tasks.set(parent.id, parent);
-  const input = { parentTaskId: parent.id, data: { name: "需求测试", type: "test", assignedTo: "tester", desc: "功能验收\n回归" } };
+  const input = { parentTaskId: parent.id, data: { name: "需求测试", type: "test", assignedTo: "tester", desc: '功能验收 & Map<String>\n\n"回归"与\'边界\'、字面量 &lt;p&gt;' } };
   const start = requests.length;
   assert.equal((await call("create_subtask", input)).written, false);
   assert.equal(requests.slice(start).some(item => item.method === "POST"), false);
@@ -788,6 +789,7 @@ test("子任务经stdio发现、预览、正式拆分及回读，重复调用不
   assert.equal(result.task.parent, parent.id);
   assert.equal(result.task.execution, 9);
   assert.equal(result.task.assignedTo, "tester");
+  assert.match(result.task.desc, /功能验收 &amp; Map&lt;String&gt;/);
   assert.equal(parent.parent, -1);
   assert.equal(parent.children[0].id, 9899);
   const writes = requests.slice(start).filter(item => item.method === "POST");
@@ -796,6 +798,36 @@ test("子任务经stdio发现、预览、正式拆分及回读，重复调用不
   assert.equal(writes[0].body["parent[1]"], "9900");
   assert.equal((await call("create_subtask", { ...input, dryRun: false })).alreadyExists, true);
   assert.equal(requests.slice(start).filter(item => item.method === "POST").length, 1);
+});
+
+test("子任务HTML排版经stdio在写入前拒绝，不留下已创建的错误描述", async () => {
+  const start = requests.length;
+  const reply = await client.callTool({ name: "create_subtask", arguments: {
+    parentTaskId: 9900, data: { name: "错误排版", type: "devel", desc: "<p>第一段</p><p>第二段</p>" }, dryRun: false,
+  } });
+  assert.equal(reply.isError, true);
+  assert.match(reply.content[0].text, /纯文本/);
+  assert.equal(requests.length, start, "非法格式应在任何服务端请求前拒绝");
+});
+
+test("父子任务描述修复经stdio保留原字段，仍拒绝修改其他字段", async () => {
+  for (const [id, parent] of [[9910, -1], [9911, 9910]]) {
+    const before = { id, parent, name: "描述修复", type: "devel", execution: 9, project: 20,
+      mode: "", team: [], module: 0, story: 0, pri: 3, status: "done", assignedTo: "owner",
+      estimate: 16, consumed: 16, left: 0, estStarted: "", deadline: "",
+      realStarted: "2026-11-20 08:00:00", finishedDate: "2026-11-21 17:00:00", finishedBy: "original-finisher",
+      desc: "&lt;p&gt;第一段&lt;/p&gt;" };
+    records.tasks.set(id, structuredClone(before));
+    const desc = "<p>第一段</p>\n<p>第二段</p>";
+    const start = requests.length;
+    await call("update_task", { taskId: id, data: { desc } });
+    assert.deepEqual(await call("get_task", { taskId: id }), { ...before, desc });
+    assert.equal(requests.slice(start).filter(item => item.method === "POST").length, 1);
+    const count = requests.filter(item => item.method === "POST").length;
+    const rejected = await client.callTool({ name: "update_task", arguments: { taskId: id, data: { desc, name: "其他名称" } } });
+    assert.equal(rejected.isError, true);
+    assert.equal(requests.filter(item => item.method === "POST").length, count);
+  }
 });
 
 test("子任务权限拒绝和落库不明经stdio报错，不自动重试", async () => {

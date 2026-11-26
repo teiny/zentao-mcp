@@ -140,7 +140,7 @@ const definitions = {
     required: ["name", "type"],
   },
   update_task: {
-    description: "通过正式编辑流程修改普通单人任务并保留其他字段、日期及完成者；支持明确更正实际开始时间和完成者，不流转状态",
+    description: "通过正式编辑流程修改普通单人任务并保留其他字段、日期及完成者；父子任务仅允许单独修改desc（支持HTML）；子任务编辑可触发服务端父任务汇总",
     method: "PUT", id: "taskId", endpoint: (id) => `/tasks/${id}`,
     fields: { ...taskFields, realStarted: { ...text("更正实际开始时间，禅道本地时间YYYY-MM-DD HH:mm:ss"), pattern: "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$" }, finishedBy: text("更正完成者账号，不改变状态或工时") },
     preserveTaskDates: true,
@@ -232,7 +232,12 @@ async function updateTask(id, body, request, nativeRequest) {
   if (Object.hasOwn(body, "finishedBy") && !body.finishedBy.trim()) throw new Error("finishedBy必须为非空账号");
   const current = (await nativeRequest("task", "edit", id))?.task;
   if (Number(current?.id) !== id || current.deleted === true || current.deleted === "1") throw new Error("任务不存在、已删除或对象ID不匹配");
-  if (current.mode || Number(current.parent) !== 0) throw new Error("任务编辑目前仅支持普通单人任务，不修改多人或父子任务");
+  const parent = Number(current.parent);
+  const descriptionOnly = Object.keys(body).length === 1 && Object.hasOwn(body, "desc");
+  if (current.mode || !Number.isSafeInteger(parent) || parent < -1 ||
+      (parent !== 0 && (!descriptionOnly || (current.team?.length ?? 0) > 0))) {
+    throw new Error("任务编辑不支持多人任务；父子任务仅允许单独修改desc");
+  }
   const fields = ["name", "type", "desc", "assignedTo", "pri", "estimate", "left", "consumed", "story", "parent", "execution", "module", "status", "estStarted", "deadline", "realStarted", "finishedDate", "finishedBy"];
   const form = new URLSearchParams();
   for (const key of fields) {
@@ -254,9 +259,22 @@ async function updateTask(id, body, request, nativeRequest) {
   for (const recipient of recipients) form.append("mailto[]", typeof recipient === "object" ? recipient.account : recipient);
   form.set("comment", "");
   form.set("uid", "");
+  if (parent !== 0 && current.lastEditedDate) form.set("lastEditedDate", current.lastEditedDate);
   // 17.0任务API不能可靠保留/更正实际开始时间，使用正式编辑表单并携带原字段。
   await nativeRequest("task", "edit", id, form);
-  return request(`/tasks/${id}`);
+  const saved = await request(`/tasks/${id}`);
+  if (parent !== 0) {
+    const checked = (await nativeRequest("task", "edit", id))?.task;
+    const value = (task, key) => String((key.endsWith("By") || key === "assignedTo") && task?.[key] && typeof task[key] === "object"
+      ? task[key].account : task?.[key] ?? "").replace(/\r\n/g, "\n");
+    if (Number(checked?.id) !== id || Number(saved.id) !== id || Number(saved.parent) !== parent ||
+        value(checked, "desc") !== value(body, "desc") ||
+        [...fields, "project", "mode", "fromBug", "canceledBy", "canceledDate", "closedBy", "closedDate", "closedReason"]
+          .some(key => key !== "desc" && value(checked, key) !== value(current, key))) {
+      throw new Error("父子任务描述或原字段回读不一致，可能已生效；请只读核实，不要盲目重试");
+    }
+  }
+  return saved;
 }
 
 export async function callWriteTool(name, args, request, nativeRequest) {

@@ -42,6 +42,48 @@ test("仅修改描述时保留原实际开始、完成时间和其他字段", as
   }
 });
 
+test("父任务和已完成子任务仅修改描述，保留父子关系、工时、日期和完成者", async () => {
+  for (const parent of [-1, 41]) {
+    const b = backend({ parent, status: "done", left: 0, finishedBy: "original-finisher",
+      finishedDate: "2026-11-20 11:12:52" });
+    const before = structuredClone(b.record);
+    const desc = "<p>第一段</p>\n<p>第二段</p>";
+    const result = await callWriteTool("update_task", { taskId: 42, data: { desc } }, b.request, b.native);
+    assert.deepEqual(result, { ...before, desc });
+    assert.deepEqual(b.record, { ...before, desc });
+    assert.equal(b.writes.length, 1);
+  }
+});
+
+test("父子任务仍拒绝描述之外或混合字段的修改", async () => {
+  for (const parent of [-1, 41]) {
+    for (const data of [{ name: "其他名称" }, { desc: "<p>说明</p>", assignedTo: "other" }, { realStarted: "2026-11-20 09:00:00" }]) {
+      const b = backend({ parent });
+      await assert.rejects(callWriteTool("update_task", { taskId: 42, data }, b.request, b.native), /父子任务/);
+      assert.equal(b.writes.length, 0);
+    }
+  }
+});
+
+test("父子任务描述保存后字段意外变化或HTML再次转义时不误报成功", async () => {
+  for (const change of [
+    task => { task.consumed = 99; }, task => { task.parent = 0; },
+    task => { task.desc = "&lt;p&gt;说明&lt;/p&gt;"; },
+  ]) {
+    const b = backend({ parent: 41 });
+    await assert.rejects(callWriteTool("update_task", { taskId: 42, data: { desc: "<p>说明</p>" } }, b.request,
+      async (...args) => {
+        const result = await b.native(...args);
+        if (args[3]) change(b.record);
+        return result;
+      }), /不要盲目重试/);
+    assert.equal(b.writes.length, 1);
+  }
+  const team = backend({ parent: 41, team: [{ account: "owner" }] });
+  await assert.rejects(callWriteTool("update_task", { taskId: 42, data: { desc: "说明" } }, team.request, team.native));
+  assert.equal(team.writes.length, 0);
+});
+
 test("可明确恢复实际开始时间，保留描述、状态、工时和完成时间", async () => {
   const b = backend({ realStarted: "0000-00-00 00:00:00" });
   const before = structuredClone(b.record);
@@ -72,7 +114,7 @@ test("原字段缺失、日期无法识别、对象不匹配或复杂任务时�
   for (const change of [
     task => { delete task.realStarted; }, task => { delete task.finishedDate; }, task => { delete task.desc; },
     task => { task.realStarted = "2026-11-13T07:37:49Z"; }, task => { task.id = 43; },
-    task => { task.mode = "multi"; }, task => { task.parent = -1; }
+    task => { task.mode = "multi"; }, task => { task.parent = -2; }
   ]) {
     const b = backend();
     change(b.record);

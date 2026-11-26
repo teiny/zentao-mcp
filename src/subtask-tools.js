@@ -2,9 +2,10 @@ import { positiveId, taskFields, validateData } from "./write-tools.js";
 
 const fields = Object.fromEntries(["name", "type", "assignedTo", "module", "story", "pri", "estimate", "estStarted", "deadline", "desc"]
   .map(key => [key, taskFields[key]]));
+fields.desc = { ...taskFields.desc, description: "子任务描述为纯文本，使用换行分段；不要传入<p>、<br>等HTML排版或预先转义" };
 export const subtaskTools = [{
   name: "create_subtask",
-  description: "通过禅道17.0正式拆分流程创建一个子任务并回读父子关系；保留既有子任务及工时。默认预览，dryRun=false写入，结果不明不自动重试",
+  description: "通过禅道17.0正式拆分流程创建一个子任务，desc为纯文本并保留换行，回读父子关系；保留既有子任务及工时。默认预览，dryRun=false写入，结果不明不自动重试",
   inputSchema: {
     type: "object",
     properties: {
@@ -17,12 +18,14 @@ export const subtaskTools = [{
 }];
 const account = value => typeof value === "string" ? value : value?.account ?? "";
 const date = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && value !== "0000-00-00" ? value : "";
-const description = value => String(value ?? "").replace(/<br\s*\/?>/gi, "\n").replace(/\r\n/g, "\n").replace(/\n+/g, "\n").trim();
+const description = value => String(value ?? "").replace(/<br\s*\/?>/gi, "\n").replace(/\r\n?/g, "\n").replace(/\n+/g, "\n").trim();
+const decodeDescription = value => value.replace(/&(amp|lt|gt|quot|#0*39);/g,
+  (_, entity) => entity[0] === "#" ? "'" : ({ amp: "&", lt: "<", gt: ">", quot: '"' })[entity]);
 
 function matches(task, data) {
   return Object.entries(data).every(([key, value]) => {
     if (key === "assignedTo") return account(task[key]) === value;
-    if (key === "desc") return description(task[key]) === description(value);
+    if (key === "desc") return decodeDescription(description(task[key])) === description(value);
     if (["estStarted", "deadline"].includes(key)) return date(task[key]) === value;
     if (typeof value === "number") return Number(task[key]) === value;
     return task[key] === value;
@@ -35,6 +38,9 @@ export async function createSubtask(args, request, nativeRequest) {
   positiveId(args.parentTaskId, "parentTaskId");
   if (args.dryRun !== undefined && typeof args.dryRun !== "boolean") throw new Error("dryRun必须为布尔值");
   const data = validateData(args.data, fields, ["name", "type"]);
+  if (/<\/?(?:p|br|div|h[1-6]|ul|ol|li|strong|em|b|i|a|span|pre|code|table|thead|tbody|tr|th|td|img|blockquote)(?:\s|\/?>)/i.test(data.desc ?? "")) {
+    throw new Error("17.0拆分接口的desc只支持纯文本，请用换行分段；需要富文本时创建后仅用update_task修改desc，未创建子任务");
+  }
   if (data.estStarted && data.deadline && data.deadline < data.estStarted) throw new Error("截止日期不能早于预计开始日期");
   const parent = await request(`/tasks/${args.parentTaskId}`);
   if (Number(parent?.id) !== args.parentTaskId || [true, 1, "1"].includes(parent.deleted)) throw new Error("父任务不存在或已删除");
