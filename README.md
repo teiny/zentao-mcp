@@ -1,6 +1,6 @@
 # 禅道 MCP 服务器
 
-这是一个基于禅道 RESTful API v1 的 MCP (Model Context Protocol) 服务器，通过 zentaosid 进行 Cookie 认证，可以查询、新建和修改产品、项目、执行、需求、Bug、任务，不提供删除功能。团队维护及任务 PDF 附件使用禅道 17.0 原生表单接口封装为专用 MCP 工具。
+这是一个基于禅道 RESTful API v1 的 MCP (Model Context Protocol) 服务器，原有工具通过 zentaosid 进行 Cookie 认证，新增独立 API Key 入口使用 Token 请求头认证，可以查询、新建和修改产品、项目、执行、需求、Bug、任务，不提供删除功能。团队维护及任务 PDF 附件使用禅道 17.0 原生表单接口封装为专用 MCP 工具。
 
 ## 功能特性
 
@@ -55,6 +55,21 @@ export ZENTAO_SID=your-zentaosid
 ### 方式二：MCP 工具动态配置（推荐）
 
 使用 `configure` 工具动态设置连接信息，更灵活且不需要在配置文件中硬编码敏感信息。
+
+## 独立 API Key 入口
+
+保留原有 SID 工具和 `configure`，新增两个独立工具：
+
+- `configure_api_key({url, appKey})`：只配置 API Key 连接，不修改 SID；也可用启动环境 `ZENTAO_URL`、`ZENTAO_APP_KEY`。
+- `call_api_key_tool({tool, arguments})`：使用该连接调用现有业务工具，参数按原工具 inputSchema。仅允许已有业务工具，不开放任意 HTTP 路由、删除或嵌套调用。
+
+```json
+{"tool":"get_task","arguments":{"taskId":42}}
+```
+
+原有业务工具直接调用仍使用 SID。API Key 入口发送 `Token`，不发送 SID Cookie，也不自动回退SID。两种配置可并存，并发请求各自持有连接快照。分页、预览、字段校验及写后回读沿用原业务工具；原生表单操作先经v1核对身份，再使用同一Token调用固定路由。不会自动登录或刷新密钥；401、403和业务失败如实返回，不重试写入。
+
+禅道17.0 REST v1支持已绑定账号的应用密钥：[应用账号匹配](https://github.com/easysoft/zentaopms/blob/zentaopms_17.0/module/common/model.php#L2486)、[Token请求头处理](https://github.com/easysoft/zentaopms/blob/zentaopms_17.0/framework/base/router.class.php#L945)。这与旧版API的应用代号、时间戳签名协议不同。配置成功或发现工具不代表认证通过，需实际业务查询验证。更新源码后，已有常驻MCP进程须重载；可用同配置新建的stdio客户端验证，不终止共享宿主。
 
 ## 使用方法
 

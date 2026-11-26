@@ -10,6 +10,9 @@ import { callWriteTool, isWriteTool, positiveId, writeTools } from "./write-tool
 import { callListTool, isListTool, listTools } from "./list-tools.js";
 import { callWorkflowTool, isWorkflowTool, workflowTools } from "./workflow-tools.js";
 import { createSubtask, subtaskTools } from "./subtask-tools.js";
+import { apiKeyTools, validateApiKeyConfig, apiKeyInvocation } from "./api-key-tools.js";
+
+let apiKeyConfig = { url: process.env.ZENTAO_URL || "", appKey: process.env.ZENTAO_APP_KEY || "" };
 
 // 配置存储
 let config = {
@@ -25,7 +28,7 @@ async function apiRequest(endpoint, method = "GET", body = null) {
 }
 
 // 仅供专用工具使用的17.0原生JSON表单接口，不向调用者开放任意路由。
-async function nativeRequest(module, action, objectId, body = null, parentTaskId = null) {
+async function nativeRequest(module, action, objectId, body = null, parentTaskId = null, connection = config) {
   const allowed = { project: ["team", "manageMembers", "edit", "close"], execution: ["team", "manageMembers", "close"], task: ["edit", "close", "comment", "finish", "batchCreate"] };
   if (!Object.hasOwn(allowed, module) || !allowed[module].includes(action)) throw new Error("不支持的原生接口");
   positiveId(objectId, "objectId");
@@ -35,25 +38,27 @@ async function nativeRequest(module, action, objectId, body = null, parentTaskId
     : module === "task" && action === "comment"
       ? `/index.php/action-comment-task-${objectId}.json`
       : `/index.php/${module}-${action}-${objectId}.json`;
-  return sendRequest(path, body === null ? "GET" : "POST", body, true);
+  return sendRequest(path, body === null ? "GET" : "POST", body, true, connection);
 }
 
-async function sendRequest(path, method, body, native = false) {
+async function sendRequest(path, method, body, native = false, connection = config) {
+  const apiKey = Object.hasOwn(connection, "appKey");
+  const credential = apiKey ? connection.appKey : connection.zentaosid;
   if (!["GET", "POST", "PUT"].includes(method)) {
     throw new Error("仅支持查询、新建和修改，禁止删除数据");
   }
-  if (!config.zentaosid) {
-    throw new Error("请先配置 zentaosid");
+  if (!credential) {
+    throw new Error(apiKey ? "请先配置 API Key（ZENTAO_APP_KEY或configure_api_key）" : "请先配置 zentaosid");
   }
   
   // 确保 URL 末尾没有斜杠，然后拼接路径
-  const baseUrl = config.url.replace(/\/$/, "");
+  const baseUrl = connection.url.replace(/\/$/, "");
   const url = `${baseUrl}${path}`;
 
   const options = {
     method,
     headers: {
-      Cookie: `zentaosid=${config.zentaosid}`, // Cookie 中使用 zentaosid
+      ...(apiKey ? { Token: credential } : { Cookie: `zentaosid=${credential}` }),
       Accept: "application/json",
     },
     redirect: "manual",
@@ -96,7 +101,7 @@ async function sendRequest(path, method, body, native = false) {
     }
     return result;
   } catch (error) {
-    const message = config.zentaosid ? error.message.split(config.zentaosid).join("[已隐藏]") : error.message;
+    const message = credential ? error.message.split(credential).join("[已隐藏]") : error.message;
     throw new Error(`API 请求出错: ${message}`);
   }
 }
@@ -115,9 +120,7 @@ const server = new Server(
 );
 
 // 列出所有可用工具
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
+const existingTools = [
       {
         name: "configure",
         description: "配置禅道连接信息（URL、zentaosid）",
@@ -205,14 +208,37 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       ...writeTools,
       ...workflowTools,
       ...subtaskTools,
-    ],
-  };
+];
+const businessTools = existingTools.filter(tool => tool.name !== "configure");
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...existingTools, ...apiKeyTools(businessTools)] }));
+
+// 原有业务工具仍沿用SID；新增入口使用独立连接，避免并发切换全局认证。
+server.setRequestHandler(CallToolRequestSchema, async ({ params: { name, arguments: args } }) => {
+  try {
+    if (name === "configure_api_key") {
+      apiKeyConfig = validateApiKeyConfig(args);
+      return { content: [{ type: "text", text: "API Key连接已配置，待业务查询验证；原SID连接未修改" }] };
+    }
+    if (name === "call_api_key_tool") {
+      const invocation = apiKeyInvocation(args, businessTools);
+      const connection = { ...apiKeyConfig };
+      const request = (endpoint, method = "GET", body = null) => sendRequest(`/api.php/v1${endpoint}`, method, body, false, connection);
+      let authenticated;
+      const native = async (module, action, id, body = null, parentId = null) => {
+        // 17.0由v1校验应用绑定账号并建立Token对应的服务端会话。
+        authenticated ??= request("/user");
+        await authenticated;
+        return nativeRequest(module, action, id, body, parentId, connection);
+      };
+      return await callBusinessTool(invocation.name, invocation.args, request, native);
+    }
+    return await callBusinessTool(name, args, apiRequest, nativeRequest);
+  } catch (error) {
+    return { content: [{ type: "text", text: `错误: ${error.message}` }], isError: true };
+  }
 });
 
-// 处理工具调用
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
+async function callBusinessTool(name, args, apiRequest, nativeRequest) {
   try {
     if (name === "create_subtask") {
       const result = await createSubtask(args, apiRequest, nativeRequest);
@@ -320,7 +346,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   }
-});
+}
 
 // 启动服务器
 async function main() {
